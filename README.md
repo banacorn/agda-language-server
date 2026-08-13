@@ -18,7 +18,7 @@ Follow the instructions and the language server should be installed within secon
 
 ### Prebuilt binaries
 
-You can also download prebuilt binaries [from the release page](https://github.com/banacorn/agda-language-server/releases) if you are using other LSP-compatible text editors.
+You can also download prebuilt binaries [from the release page](https://github.com/agda/agda-language-server/releases) if you are using other LSP-compatible text editors.
 
 Supported platforms: **Windows**, **Mac**, and **Ubuntu**.
 
