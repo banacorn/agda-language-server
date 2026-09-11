@@ -186,6 +186,11 @@ jobs:
           enable-stack: true
           stack-version: ${{ inputs.stack_version }}
 
+      - name: Resolve native platform dependencies (ICU/pkgconf on Windows, PKG_CONFIG_PATH on macOS)
+        if: matrix.kind == 'native'
+        working-directory: src
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/cache-benchmark/resolve-native-platform-deps.sh"
+
       - name: Verify Stack version
         if: matrix.kind == 'native'
         run: |
