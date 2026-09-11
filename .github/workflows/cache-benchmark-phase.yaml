@@ -58,6 +58,13 @@ jobs:
       matrix:
         include: ${{ fromJson(inputs.entries_json) }}
     steps:
+      # Harness scripts (.github/scripts/**) live at HARNESS_SHA, the
+      # commit that triggered this run -- independent of BASE_SHA /
+      # REDESIGN_SHA, which are only checked out under src/ below for the
+      # actual project source being built.
+      - name: Checkout harness scripts
+        uses: actions/checkout@v4
+
       - name: Checkout source (${{ matrix.strategy == 'legacy' && 'BASE_SHA' || 'REDESIGN_SHA' }})
         uses: actions/checkout@v4
         with:
@@ -162,7 +169,7 @@ jobs:
 
       - name: Resolve ICU version
         if: matrix.kind == 'native'
-        run: bash .github/scripts/cache-benchmark/resolve-icu-version.sh
+        run: bash .github/scripts/resolve-icu-version.sh
 
       - name: Compute compiled-dependency cache config
         if: matrix.kind == 'native'

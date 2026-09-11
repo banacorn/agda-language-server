@@ -6,6 +6,12 @@ defaults:
   run:
     shell: bash
 
+env:
+  # Pinned exact Stack version (ci.md PR 1 commit 2): installed and
+  # verified on every platform, and baked into the toolchain and
+  # compiled-dependency cache keys below. Never 'latest'.
+  STACK_VERSION: '3.3.1'
+
 on:
   push:
     branches: [master]
@@ -39,6 +45,21 @@ jobs:
 
     - name: 🔍 Check for generated-file drift
       run: git diff --exit-code -- agda-language-server.cabal
+
+    - name: 🏗 Setup Haskell
+      uses: haskell-actions/setup@v2
+      with:
+        ghc-version: '9.10.2'
+        enable-stack: true
+        stack-version: ${{ env.STACK_VERSION }}
+
+    - name: 🔒 Check stack-*.yaml.lock drift (fails if Stack would rewrite it)
+      run: |
+        for f in stack-9.10.2-Agda-2.8.0.yaml stack-9.10.2-Agda-2.7.0.1.yaml stack-9.10.2-Agda-2.6.4.3.yaml; do
+          echo "::group::${f}.lock"
+          stack build --stack-yaml "$f" --dry-run --lock-file error-on-write
+          echo "::endgroup::"
+        done
 
   build-and-test:
     name: Build and Test
@@ -96,75 +117,45 @@ jobs:
         echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
         echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
 
-    - name: 💾 Cache Haskell toolchain
-      id: haskell-toolchain
-      if: runner.os == 'macOS'
-      uses: actions/cache/restore@v4
-      with:
-        path: |
-          ~/.ghcup
-          ~/.stack/programs
-          ~/.stack/pantry
-        key: ${{ runner.os }}-${{ runner.arch }}-haskell-${{ env.GHC_VERSION }}-stack-latest
-        restore-keys: |
-          ${{ runner.os }}-${{ runner.arch }}-haskell-${{ env.GHC_VERSION }}-
-          ${{ runner.os }}-${{ runner.arch }}-haskell-
+    # Redesigned cache boundaries (ci.md PR 1 commit 2):
+    #  - macOS toolchain cache holds only ~/.ghcup, keyed by the pinned
+    #    STACK_VERSION and GHC_VERSION (no Agda target -- shared across
+    #    the three Agda entries for this architecture). Only the Agda
+    #    2.8.0 entry is allowed to save it, so the three parallel jobs
+    #    for one architecture never race to write the same key.
+    #  - The compiled-dependency cache holds only
+    #    $STACK_ROOT/{snapshots,setup-exe-cache}, is Agda-specific (so
+    #    each Agda entry owns its own key), and is keyed by every
+    #    dimension that changes its compatibility (OS, arch, Stack, GHC,
+    #    ICU ABI, resolver, Agda target) plus CONFIG_HASH, so that a
+    #    prefix hit (only CONFIG_HASH differs) is only ever used when
+    #    every other dimension is identical, and any other dimension
+    #    changing yields a complete miss (the restore-keys prefix itself
+    #    changes, so a differently-configured entry cannot match it).
+    #  - No .stack-work caching: removed outright per commit 2 pending a
+    #    future measurement showing a net wall-clock benefit.
 
-    - name: 🏗 Setup Haskell
-      if : runner.os == 'macOS'
+    - name: 🏗 Setup Haskell (pinned Stack version, all platforms)
       uses: haskell-actions/setup@v2
-      id: setup-haskell
       with:
         ghc-version: ${{ env.GHC_VERSION }}
         enable-stack: true
-        stack-version: 'latest'
+        stack-version: ${{ env.STACK_VERSION }}
 
-    - name: 💾 Cache Haskell toolchain
-      if: runner.os == 'macOS' && github.ref == 'refs/heads/master' && steps.haskell-toolchain.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: |
-          ~/.ghcup
-          ~/.stack/programs
-          ~/.stack/pantry
-        key: ${{ steps.haskell-toolchain.outputs.cache-primary-key }}
-  
+    - name: 🔍 Verify pinned Stack version
+      run: |
+        actual="$(stack --numeric-version)"
+        echo "Stack version: ${actual}"
+        if [[ "${actual}" != "${STACK_VERSION}" ]]; then
+          echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
+          exit 1
+        fi
+
     - name: 🎛️ Determine Stack root
       run: |
         STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
         echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
 
-    - name: 🔍 Review all variables
-      run: |
-        echo "STACK_YAML      = ${STACK_YAML}"
-        echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
-        echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
-        echo "ARTEFACT        = ${ARTEFACT}"
-        echo "GHC_VERSION     = ${GHC_VERSION}"
-        echo "STACK_ROOT      = ${STACK_ROOT}"
-
-    # things to be restored:
-    # Include STACK_RESOLVER in cache key, otherwise caches accumulate build products for different resolvers.
-
-    - name: 💾 Restore cached stack global package db
-      id:   stack-global
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ env.STACK_ROOT }}
-        key: ${{ matrix.os }}-stack-resolver-${{ env.STACK_RESOLVER }}-global-${{ hashFiles('**.yaml') }}-${{ matrix.agda }}
-        restore-keys: |
-             ${{ matrix.os }}-stack-resolver-${{ env.STACK_RESOLVER }}-global-${{ matrix.agda }}
-
-    - name: 💾 Restore cached .stack-work
-      id:   stack-work
-      uses: actions/cache/restore@v4
-      with:
-        path: .stack-work
-        key: ${{ matrix.os }}-stack-resolver-${{ env.STACK_RESOLVER }}-work-${{ hashFiles('**.yaml') }}-${{ matrix.agda }}
-        restore-keys: |
-             ${{ matrix.os }}-stack-resolver-${{ env.STACK_RESOLVER }}-work
-
-    # actions:
     - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
       if: runner.os == 'macOS'
       run: |
@@ -180,34 +171,86 @@ jobs:
       run: |
         stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
 
+    - name: 🎛️ Resolve ICU version
+      env:
+        RUNNER_OS: ${{ runner.os }}
+      run: bash .github/scripts/resolve-icu-version.sh
+
+    - name: 🎛️ Compute compiled-dependency CONFIG_HASH
+      run: |
+        echo CONFIG_HASH="${{ hashFiles(env.STACK_YAML, format('{0}.lock', env.STACK_YAML), 'package.yaml', 'agda-language-server.cabal') }}" >> "${GITHUB_ENV}"
+
+    - name: 🔍 Review all variables
+      run: |
+        echo "STACK_YAML      = ${STACK_YAML}"
+        echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
+        echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
+        echo "ARTEFACT        = ${ARTEFACT}"
+        echo "GHC_VERSION     = ${GHC_VERSION}"
+        echo "STACK_VERSION   = ${STACK_VERSION}"
+        echo "ICU_VERSION     = ${ICU_VERSION}"
+        echo "STACK_ROOT      = ${STACK_ROOT}"
+        echo "CONFIG_HASH     = ${CONFIG_HASH}"
+
+    - name: 💾 Restore Haskell toolchain cache (macOS, shared across Agda targets)
+      id: haskell-toolchain
+      if: runner.os == 'macOS'
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.ghcup
+        key: ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+
+    - name: 💾 Restore compiled-dependency cache
+      id: stack-snapshot
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ${{ env.STACK_ROOT }}/snapshots
+          ${{ env.STACK_ROOT }}/setup-exe-cache
+        key: stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+        restore-keys: |
+          stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
+
     - name: 📸 Build Snapshot
       run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
 
     - name: 🏗️ Build Dependencies
+      id: build-deps
       run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
+
+    - name: 🏗️ Build Testings
+      id: build-test-deps
+      run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
+
+    # Cache save point: both dependency-producing steps above must have
+    # succeeded, and only the designated writer(s) may save a key shared
+    # by more than one matrix entry. A later ALS build or test failure
+    # must not invalidate an already-saved compiled-dependency cache.
+
+    - name: 💾 Save Haskell toolchain cache (Agda 2.8.0 is the sole writer)
+      if: >
+        runner.os == 'macOS' && matrix.agda == 'Agda-2.8.0' &&
+        github.ref == 'refs/heads/master' &&
+        steps.haskell-toolchain.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.ghcup
+        key: ${{ steps.haskell-toolchain.outputs.cache-primary-key }}
+
+    - name: 💾 Save compiled-dependency cache
+      if: >
+        github.ref == 'refs/heads/master' &&
+        steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' &&
+        steps.stack-snapshot.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ env.STACK_ROOT }}/snapshots
+          ${{ env.STACK_ROOT }}/setup-exe-cache
+        key: stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
 
     - name: 🏗️ Build ALS
       run: stack build $STACK_YAML_ARG
-  
-    - name: 🏗️ Build Testings
-      run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
-  
-    # things to be cached
-
-    - name: 💾 Cache stack global package db
-      if:   always() && github.ref == 'refs/heads/master' && steps.stack-global.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: ${{ env.STACK_ROOT }}
-        key: ${{ steps.stack-global.outputs.cache-primary-key }}
-
-    - name: 💾 Cache .stack-work
-      if:   always() && github.ref == 'refs/heads/master' && steps.stack-work.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: .stack-work
-        key: ${{ steps.stack-work.outputs.cache-primary-key }}
-
 
     - name: 📦 Bundle executable, DLLs and data files (on macOS)
       if: runner.os == 'macOS'
