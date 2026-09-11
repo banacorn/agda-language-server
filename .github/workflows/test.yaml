@@ -78,6 +78,12 @@ jobs:
     - name: 📤 Install yq (Windows)
       if: runner.os == 'Windows'
       uses: frenck/action-setup-yq@v1
+      with:
+        # Pinned: the default `version: latest` makes an anonymous,
+        # unauthenticated call to api.github.com to resolve the tag,
+        # which is a known flaky failure point on shared GH-runner IPs
+        # (60 req/hr anonymous quota).
+        version: v4.53.6
 
     - name: 🎛️ Determine which version of Agda to target
       run: |
