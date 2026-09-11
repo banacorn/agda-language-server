@@ -160,8 +160,18 @@ jobs:
           key: ${{ env.SECONDARY_KEY }}
           restore-keys: ${{ env.SECONDARY_EXACT_ONLY == 'false' && env.SECONDARY_RESTORE_KEYS || '' }}
 
+      # Toolchain setup (this haskell-actions/setup call, Stack version
+      # verification, and Stack root resolution) always runs for real,
+      # even in fake mode: it's the exact class of thing fake mode
+      # previously skipped and where a real bug (an unpinned third-party
+      # action hitting a GitHub API rate limit) went undetected until a
+      # real run. GHC/Stack installs via ghcup's cached binaries in
+      # ~1-2 min, so this keeps fake mode fast while still exercising
+      # every real external-action/network dependency in the toolchain
+      # setup path. Only the genuinely expensive part -- actually
+      # compiling the dependency snapshot -- stays faked below.
       - name: Setup Haskell (legacy, macOS only)
-        if: matrix.kind == 'native' && matrix.strategy == 'legacy' && runner.os == 'macOS' && inputs.fake != true
+        if: matrix.kind == 'native' && matrix.strategy == 'legacy' && runner.os == 'macOS'
         uses: haskell-actions/setup@v2
         with:
           ghc-version: ${{ env.GHC_VERSION }}
@@ -169,7 +179,7 @@ jobs:
           stack-version: 'latest'
 
       - name: Setup Haskell (redesigned, pinned Stack version, all platforms)
-        if: matrix.kind == 'native' && matrix.strategy == 'redesigned' && inputs.fake != true
+        if: matrix.kind == 'native' && matrix.strategy == 'redesigned'
         uses: haskell-actions/setup@v2
         with:
           ghc-version: ${{ env.GHC_VERSION }}
@@ -177,7 +187,7 @@ jobs:
           stack-version: ${{ inputs.stack_version }}
 
       - name: Verify Stack version
-        if: matrix.kind == 'native' && inputs.fake != true
+        if: matrix.kind == 'native'
         run: |
           actual="$(stack --numeric-version)"
           echo "resolved Stack version: ${actual}"
@@ -187,22 +197,9 @@ jobs:
           fi
 
       - name: Determine Stack root
-        if: matrix.kind == 'native' && inputs.fake != true
+        if: matrix.kind == 'native'
         working-directory: src
         run: echo "STACK_ROOT=$(stack path $STACK_YAML_ARG --stack-root)" >> "$GITHUB_ENV"
-
-      - name: Determine Stack root (fake)
-        if: matrix.kind == 'native' && inputs.fake == true
-        run: |
-          # actions/cache needs native Windows paths there (real
-          # `stack path --stack-root` already returns one); bash's $HOME
-          # on Windows runners is the POSIX-style /c/Users/... mount
-          # path, which actions/cache's path-validation step rejects.
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "STACK_ROOT=$(cygpath -w "$HOME/.fake-stack-root")" >> "$GITHUB_ENV"
-          else
-            echo "STACK_ROOT=$HOME/.fake-stack-root" >> "$GITHUB_ENV"
-          fi
 
       - name: Resolve ICU version
         if: matrix.kind == 'native'
