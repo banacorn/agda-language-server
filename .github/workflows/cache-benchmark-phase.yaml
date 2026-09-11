@@ -177,7 +177,7 @@ jobs:
 
       - name: Start restore timer
         if: matrix.kind == 'native'
-        run: echo "T_RESTORE_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        run: echo "T_RESTORE_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Restore compiled-dependency cache
         if: matrix.kind == 'native'
@@ -190,11 +190,11 @@ jobs:
 
       - name: Record restore duration
         if: matrix.kind == 'native'
-        run: echo "PRIMARY_RESTORE_MS=$(( $(date +%s%3N) - T_RESTORE_START ))" >> "$GITHUB_ENV"
+        run: echo "PRIMARY_RESTORE_MS=$(( $(date +%s000) - T_RESTORE_START ))" >> "$GITHUB_ENV"
 
       - name: Start build timer
         if: matrix.kind == 'native'
-        run: echo "T_BUILD_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        run: echo "T_BUILD_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Build snapshot and dependencies
         if: matrix.kind == 'native'
@@ -207,7 +207,7 @@ jobs:
 
       - name: Record build duration
         if: matrix.kind == 'native'
-        run: echo "BUILD_MS=$(( $(date +%s%3N) - T_BUILD_START ))" >> "$GITHUB_ENV"
+        run: echo "BUILD_MS=$(( $(date +%s000) - T_BUILD_START ))" >> "$GITHUB_ENV"
 
       - name: Measure uncompressed cache directory sizes
         if: matrix.kind == 'native'
@@ -220,7 +220,7 @@ jobs:
 
       - name: Start save timer
         if: matrix.kind == 'native'
-        run: echo "T_SAVE_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        run: echo "T_SAVE_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Save Haskell toolchain cache
         if: >
@@ -243,7 +243,7 @@ jobs:
 
       - name: Record save duration
         if: matrix.kind == 'native'
-        run: echo "SAVE_MS=$(( $(date +%s%3N) - T_SAVE_START ))" >> "$GITHUB_ENV"
+        run: echo "SAVE_MS=$(( $(date +%s000) - T_SAVE_START ))" >> "$GITHUB_ENV"
 
       - name: Record native measurement
         if: matrix.kind == 'native'
@@ -262,7 +262,7 @@ jobs:
 
       - name: Start restore timer (wasm)
         if: matrix.kind == 'wasm'
-        run: echo "T_RESTORE_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        run: echo "T_RESTORE_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Restore ghc-wasm-meta toolchain cache
         if: matrix.kind == 'wasm'
@@ -301,7 +301,7 @@ jobs:
 
       - name: Record restore duration (wasm)
         if: matrix.kind == 'wasm'
-        run: echo "PRIMARY_RESTORE_MS=$(( $(date +%s%3N) - T_RESTORE_START ))" >> "$GITHUB_ENV"
+        run: echo "PRIMARY_RESTORE_MS=$(( $(date +%s000) - T_RESTORE_START ))" >> "$GITHUB_ENV"
 
       - name: Add ghc-wasm-meta to PATH
         if: matrix.kind == 'wasm'
@@ -366,7 +366,7 @@ jobs:
 
       - name: Start build timer (wasm)
         if: matrix.kind == 'wasm'
-        run: echo "T_BUILD_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        run: echo "T_BUILD_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Cabal configure
         if: matrix.kind == 'wasm'
@@ -390,7 +390,7 @@ jobs:
 
       - name: Record build duration (wasm)
         if: matrix.kind == 'wasm'
-        run: echo "BUILD_MS=$(( $(date +%s%3N) - T_BUILD_START ))" >> "$GITHUB_ENV"
+        run: echo "BUILD_MS=$(( $(date +%s000) - T_BUILD_START ))" >> "$GITHUB_ENV"
 
       - name: Measure uncompressed cache directory sizes (wasm)
         if: matrix.kind == 'wasm'
@@ -405,7 +405,7 @@ jobs:
 
       - name: Start save timer (wasm)
         if: matrix.kind == 'wasm'
-        run: echo "T_SAVE_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+        run: echo "T_SAVE_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Save ghc-wasm-meta toolchain cache (legacy)
         if: >
@@ -436,7 +436,7 @@ jobs:
 
       - name: Record save duration (wasm)
         if: matrix.kind == 'wasm'
-        run: echo "SAVE_MS=$(( $(date +%s%3N) - T_SAVE_START ))" >> "$GITHUB_ENV"
+        run: echo "SAVE_MS=$(( $(date +%s000) - T_SAVE_START ))" >> "$GITHUB_ENV"
 
       - name: Record wasm measurement
         if: matrix.kind == 'wasm'
