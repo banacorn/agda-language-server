@@ -105,10 +105,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           source .github/scripts/cache-benchmark/lib.sh
-          n="$(cache_list_all "${BENCHMARK_REPOSITORY}" "${BENCH_PREFIX}" | jq 'length')"
-          echo "found ${n} cache entries under prefix ${BENCH_PREFIX} before warm run"
+          n=0
+          for attempt in 1 2 3 4 5 6; do
+            n="$(cache_list_all "${BENCHMARK_REPOSITORY}" "${BENCH_PREFIX}" | jq 'length')"
+            echo "attempt ${attempt}: found ${n} cache entries under prefix ${BENCH_PREFIX}"
+            if [[ "$n" -gt 0 ]]; then
+              break
+            fi
+            sleep 15
+          done
           if [[ "$n" -eq 0 ]]; then
-            echo "::error::no cache entries survived from the cold run for pair '${PAIR_ID}' (prefix ${BENCH_PREFIX}); this sample is invalid and must be discarded and re-run under a new pair id"
+            echo "::error::no cache entries survived from the cold run for pair '${PAIR_ID}' (prefix ${BENCH_PREFIX}) after 6 retries over 75s; this sample is invalid and must be discarded and re-run under a new pair id"
+            echo "--- diagnostic: unfiltered cache list (first page) ---"
+            gh api "repos/${BENCHMARK_REPOSITORY}/actions/caches" --method GET -F per_page=100 -F page=1 || true
             exit 1
           fi
 

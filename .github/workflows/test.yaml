@@ -509,7 +509,14 @@ jobs:
       id: native-utils-cache-restore
       uses: actions/cache/restore@v4
       with:
-        path: ~/.ghc-wasm/native-utils
+        # --install-method=copy is not relocatable: alex/happy still look
+        # up runtime data files (e.g. AlexTemplate.hs) via their own
+        # cabal store entry, so the store must be cached alongside the
+        # installdir copies or the binaries crash on a fresh restore.
+        path: |
+          ~/.ghc-wasm/native-utils
+          ~/.local/state/cabal/store
+          ~/.cabal/store
         key: ${{ env.NATIVE_UTILS_KEY }}
 
     - name: Add native-utilities dir to PATH (exact hit)
@@ -544,7 +551,10 @@ jobs:
         steps.install-native-utils.outcome == 'success'
       uses: actions/cache/save@v4
       with:
-        path: ~/.ghc-wasm/native-utils
+        path: |
+          ~/.ghc-wasm/native-utils
+          ~/.local/state/cabal/store
+          ~/.cabal/store
         key: ${{ env.NATIVE_UTILS_KEY }}
 
     - name: Checkout Agda submodule at v${{ matrix.agda.name }}

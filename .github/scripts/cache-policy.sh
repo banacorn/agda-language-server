@@ -127,12 +127,19 @@ redesigned_wasm_toolchain_key() {
 redesigned_native_utils_paths() {
   # alex/happy are installed with `cabal install --installdir=... \
   # --install-method=copy`, into a dedicated directory this cache owns
-  # exclusively, so the payload is exactly "their installed binaries" --
-  # self-contained copies that don't need cabal's store to run. The
-  # mutable Cabal index (~/.config/cabal, ~/.cache/cabal) is deliberately
-  # excluded: it is not part of producer identity, and `cabal update`
-  # runs fresh on every use regardless of cache state.
-  printf '%s\n' "$HOME/.ghc-wasm/native-utils"
+  # exclusively -- but `--install-method=copy` is NOT relocatable: the
+  # copied binary still has an absolute path to its own cabal *store*
+  # entry baked in (e.g. alex looks up its AlexTemplate.hs via
+  # Paths_alex, resolved against the store path fixed at build time).
+  # Without the store entry, the binary crashes at runtime on a fresh
+  # restore ("openFile: does not exist"). So the payload must include
+  # both the installdir copies AND the cabal store, unlike a genuinely
+  # relocatable/static binary. The mutable Cabal *index*
+  # (~/.config/cabal, ~/.cache/cabal) is still deliberately excluded: it
+  # is not part of producer identity, and `cabal update` runs fresh on
+  # every use regardless of cache state. The store, by contrast, is
+  # content-addressed by package+flags+compiler and safe to cache.
+  printf '%s\n' "$HOME/.ghc-wasm/native-utils" "$HOME/.local/state/cabal/store" "$HOME/.cabal/store"
 }
 
 # NATIVE_UTILITIES_PRODUCER_HASH covers its cache schema, host
