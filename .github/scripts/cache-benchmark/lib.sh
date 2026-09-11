@@ -41,7 +41,14 @@ cache_list_all() {
     batch_n="$(jq 'length' <<<"$batch_all")"
     seen=$((seen + batch_n))
     matched="$(jq -c --arg p "$prefix" '[.[] | select(.key | startswith($p))]' <<<"$batch_all")"
-    collected="$(jq -c -s '.[0] + .[1]' <(echo "$collected") <(echo "$matched"))"
+    # Not <(...) process substitution: it opens /proc/self/fd/N-style
+    # paths that are flaky on Windows' Git-Bash/MSYS emulation and were
+    # silently failing there (jq: Could not open file .../fd/63), which
+    # is the actual, sole cause of every "0 cache entries found" on
+    # Windows warm jobs this session -- not API filtering, propagation
+    # lag, or HTTP caching, all of which were rejected as theories only
+    # because this bug was masking whether those fixes worked.
+    collected="$(jq -cn --argjson a "$collected" --argjson b "$matched" '$a + $b')"
     if [[ "$seen" -ge "$total" ]] || [[ "$batch_n" -eq 0 ]]; then
       break
     fi
