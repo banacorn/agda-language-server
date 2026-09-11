@@ -6,13 +6,23 @@ set -euo pipefail
 
 # cache_list_page REPO KEY_PREFIX PAGE
 # Prints one page (100 entries) of the cache list JSON payload as-is.
+#
+# The "_" query param is a cache-busting nonce: a fixed-URL GET here was
+# observed to return a stale (empty) result for several minutes after a
+# genuinely successful save, specifically on Windows runners, while the
+# same query from ubuntu/macOS runners (and gh api calls made from
+# outside any runner entirely) saw the fresh result immediately. That
+# points at an HTTP-level cache sitting in front of api.github.com on the
+# Windows runner image's egress path, not an eventual-consistency issue
+# in GitHub's cache backend itself -- so vary the URL on every call.
 cache_list_page() {
   local repo="$1" prefix="$2" page="$3"
   gh api "repos/${repo}/actions/caches" \
     --method GET \
     -f "key=${prefix}" \
     -F "per_page=100" \
-    -F "page=${page}"
+    -F "page=${page}" \
+    -F "_=${RANDOM}${RANDOM}${RANDOM}"
 }
 
 # cache_list_all REPO KEY_PREFIX
