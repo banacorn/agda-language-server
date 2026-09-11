@@ -11,6 +11,10 @@ on:
       phase:
         required: true
         type: string      # "cold" | "warm"
+      fake:
+        required: false
+        type: boolean
+        default: false
       rep:
         required: true
         type: number
@@ -91,6 +95,7 @@ jobs:
             echo "BENCH_PHASE=${{ inputs.phase }}"
             echo "RUNNER_OS=${{ runner.os }}"
             echo "RUNNER_ARCH=${{ runner.arch }}"
+            echo "BENCH_FAKE=${{ inputs.fake }}"
             echo "BENCHMARK_REPOSITORY=${{ inputs.benchmark_repository }}"
             echo "STACK_VERSION=${{ inputs.stack_version }}"
             echo "GHC_WASM_META_COMMIT_HASH=${{ inputs.ghc_wasm_meta_commit_hash }}"
@@ -146,7 +151,7 @@ jobs:
           restore-keys: ${{ env.SECONDARY_EXACT_ONLY == 'false' && env.SECONDARY_RESTORE_KEYS || '' }}
 
       - name: Setup Haskell (legacy, macOS only)
-        if: matrix.kind == 'native' && matrix.strategy == 'legacy' && runner.os == 'macOS'
+        if: matrix.kind == 'native' && matrix.strategy == 'legacy' && runner.os == 'macOS' && inputs.fake != true
         uses: haskell-actions/setup@v2
         with:
           ghc-version: ${{ env.GHC_VERSION }}
@@ -154,7 +159,7 @@ jobs:
           stack-version: 'latest'
 
       - name: Setup Haskell (redesigned, pinned Stack version, all platforms)
-        if: matrix.kind == 'native' && matrix.strategy == 'redesigned'
+        if: matrix.kind == 'native' && matrix.strategy == 'redesigned' && inputs.fake != true
         uses: haskell-actions/setup@v2
         with:
           ghc-version: ${{ env.GHC_VERSION }}
@@ -162,7 +167,7 @@ jobs:
           stack-version: ${{ inputs.stack_version }}
 
       - name: Verify Stack version
-        if: matrix.kind == 'native'
+        if: matrix.kind == 'native' && inputs.fake != true
         run: |
           actual="$(stack --numeric-version)"
           echo "resolved Stack version: ${actual}"
@@ -172,9 +177,13 @@ jobs:
           fi
 
       - name: Determine Stack root
-        if: matrix.kind == 'native'
+        if: matrix.kind == 'native' && inputs.fake != true
         working-directory: src
         run: echo "STACK_ROOT=$(stack path $STACK_YAML_ARG --stack-root)" >> "$GITHUB_ENV"
+
+      - name: Determine Stack root (fake)
+        if: matrix.kind == 'native' && inputs.fake == true
+        run: echo "STACK_ROOT=$HOME/.fake-stack-root" >> "$GITHUB_ENV"
 
       - name: Resolve ICU version
         if: matrix.kind == 'native'
@@ -206,13 +215,28 @@ jobs:
         run: echo "T_BUILD_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Build snapshot and dependencies
-        if: matrix.kind == 'native'
+        if: matrix.kind == 'native' && inputs.fake != true
         id: build-deps-native
         working-directory: src
         run: |
           stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
           stack build $STACK_YAML_ARG --no-terminal --only-dependencies
           stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
+
+      - name: Build snapshot and dependencies (fake)
+        if: matrix.kind == 'native' && inputs.fake == true
+        id: build-deps-native-fake
+        run: |
+          for p in ${PRIMARY_PATHS}; do
+            mkdir -p "$p"
+            echo "fake ${BENCH_STRATEGY} ${ENTRY_ID} rep${BENCH_REP}" > "$p/fake-marker.txt"
+          done
+          if [[ "${SECONDARY_ACTIVE}" == "true" ]]; then
+            for p in ${SECONDARY_PATHS}; do
+              mkdir -p "$p"
+              echo "fake ${BENCH_STRATEGY} ${ENTRY_ID} rep${BENCH_REP}" > "$p/fake-marker.txt"
+            done
+          fi
 
       - name: Record build duration
         if: matrix.kind == 'native'
@@ -243,7 +267,7 @@ jobs:
       - name: Save compiled-dependency cache
         if: >
           matrix.kind == 'native' && matrix.is_writer == true &&
-          steps.build-deps-native.outcome == 'success' &&
+          (steps.build-deps-native.outcome == 'success' || steps.build-deps-native-fake.outcome == 'success') &&
           steps.restore-primary-native.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -283,7 +307,7 @@ jobs:
           restore-keys: ${{ env.PRIMARY_EXACT_ONLY == 'false' && env.PRIMARY_RESTORE_KEYS || '' }}
 
       - name: Clone and setup ghc-wasm-meta (legacy, on prefix miss)
-        if: matrix.kind == 'wasm' && matrix.strategy == 'legacy' && steps.restore-primary-wasm.outputs.cache-matched-key == ''
+        if: matrix.kind == 'wasm' && matrix.strategy == 'legacy' && steps.restore-primary-wasm.outputs.cache-matched-key == '' && inputs.fake != true
         id: wasm-setup
         run: |
           mkdir ghc-wasm-meta && cd ghc-wasm-meta
@@ -296,7 +320,7 @@ jobs:
           FLAVOUR="${GHC_WASM_META_FLAVOUR}" ./setup.sh
 
       - name: Clone and setup ghc-wasm-meta (redesigned, on exact miss)
-        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-primary-wasm.outputs.cache-hit != 'true'
+        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-primary-wasm.outputs.cache-hit != 'true' && inputs.fake != true
         id: wasm-setup-redesigned
         run: |
           mkdir ghc-wasm-meta && cd ghc-wasm-meta
@@ -308,21 +332,34 @@ jobs:
           git checkout FETCH_HEAD
           FLAVOUR="${GHC_WASM_META_FLAVOUR}" ./setup.sh
 
+      - name: Fake ghc-wasm-meta toolchain (on miss)
+        if: >
+          matrix.kind == 'wasm' && inputs.fake == true &&
+          ((matrix.strategy == 'legacy' && steps.restore-primary-wasm.outputs.cache-matched-key == '') ||
+           (matrix.strategy == 'redesigned' && steps.restore-primary-wasm.outputs.cache-hit != 'true'))
+        run: |
+          mkdir -p ~/.ghc-wasm
+          echo "fake ${BENCH_STRATEGY} ${ENTRY_ID} rep${BENCH_REP}" > ~/.ghc-wasm/fake-marker.txt
+
       - name: Record restore duration (wasm)
         if: matrix.kind == 'wasm'
         run: echo "PRIMARY_RESTORE_MS=$(( $(date +%s000) - T_RESTORE_START ))" >> "$GITHUB_ENV"
 
       - name: Add ghc-wasm-meta to PATH
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         run: ~/.ghc-wasm/add_to_github_path.sh
 
       - name: Update wasm32 cabal index
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         run: wasm32-wasi-cabal update
 
       - name: Resolve host Cabal version
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         run: echo "CABAL_VERSION=$(~/.ghc-wasm/cabal/bin/cabal --numeric-version)" >> "$GITHUB_ENV"
+
+      - name: Resolve host Cabal version (fake)
+        if: matrix.kind == 'wasm' && inputs.fake == true
+        run: echo "CABAL_VERSION=fake-1.0" >> "$GITHUB_ENV"
 
       - name: Compute native-utilities cache config
         if: matrix.kind == 'wasm'
@@ -338,21 +375,29 @@ jobs:
           restore-keys: ${{ env.SECONDARY_EXACT_ONLY == 'false' && env.SECONDARY_RESTORE_KEYS || '' }}
 
       - name: Install native utilities (legacy, unconditional)
-        if: matrix.kind == 'wasm' && matrix.strategy == 'legacy'
+        if: matrix.kind == 'wasm' && matrix.strategy == 'legacy' && inputs.fake != true
         run: |
           ~/.ghc-wasm/cabal/bin/cabal update
           ~/.ghc-wasm/cabal/bin/cabal install "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
+
+      - name: Fake native utilities (legacy, unconditional)
+        if: matrix.kind == 'wasm' && matrix.strategy == 'legacy' && inputs.fake == true
+        run: |
+          for p in ${SECONDARY_PATHS}; do
+            mkdir -p "$p"
+            echo "fake ${BENCH_STRATEGY} ${ENTRY_ID} rep${BENCH_REP}" > "$p/fake-marker.txt"
+          done
 
       - name: Add native-utilities dir to PATH (redesigned, exact hit)
         if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit == 'true'
         run: echo "$HOME/.ghc-wasm/native-utils" >> "$GITHUB_PATH"
 
       - name: Validate restored native utilities (redesigned, exact hit)
-        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit == 'true'
+        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit == 'true' && inputs.fake != true
         run: bash .github/scripts/validate-native-utils.sh
 
       - name: Install native utilities (redesigned, on exact miss)
-        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit != 'true'
+        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit != 'true' && inputs.fake != true
         id: install-native-utils
         run: |
           ~/.ghc-wasm/cabal/bin/cabal update
@@ -362,12 +407,21 @@ jobs:
             "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
           echo "$HOME/.ghc-wasm/native-utils" >> "$GITHUB_PATH"
 
+      - name: Fake install native utilities (redesigned, on exact miss)
+        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit != 'true' && inputs.fake == true
+        id: install-native-utils-fake
+        run: |
+          for p in ${SECONDARY_PATHS}; do
+            mkdir -p "$p"
+            echo "fake ${BENCH_STRATEGY} ${ENTRY_ID} rep${BENCH_REP}" > "$p/fake-marker.txt"
+          done
+
       - name: Validate installed native utilities (redesigned, after install)
         if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.install-native-utils.outcome == 'success'
         run: bash .github/scripts/validate-native-utils.sh
 
       - name: Checkout Agda submodule at pinned commit
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         working-directory: src/wasm-submodules/agda
         run: |
           git fetch --depth 1 origin "${AGDA_COMMIT}"
@@ -378,19 +432,19 @@ jobs:
         run: echo "T_BUILD_START=$(date +%s000)" >> "$GITHUB_ENV"
 
       - name: Cabal configure
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         working-directory: src
         run: |
           mv cabal.project.wasm32 cabal.project
           wasm32-wasi-cabal configure --flag="Agda-${AGDA_FLAG}"
 
       - name: Build Agda as dependency
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         working-directory: src
         run: wasm32-wasi-cabal build lib:agda
 
       - name: Build remaining dependencies
-        if: matrix.kind == 'wasm'
+        if: matrix.kind == 'wasm' && inputs.fake != true
         id: build-deps-wasm
         working-directory: src
         run: |

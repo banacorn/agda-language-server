@@ -19,7 +19,9 @@ GHC_VERSION="$(yq .compiler "$STACK_YAML_FILE" | cut -c 5-)"
   echo "GHC_VERSION=${GHC_VERSION}"
 } >> "$GITHUB_ENV"
 
-if [[ "$RUNNER_OS" == "Windows" ]]; then
+if [[ "${BENCH_FAKE:-false}" == "true" ]]; then
+  : # fake mode: no real toolchain, nothing to install
+elif [[ "$RUNNER_OS" == "Windows" ]]; then
   stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -S --noconfirm mingw-w64-clang-x86_64-icu mingw-w64-clang-x86_64-pkgconf
   stack path --stack-yaml "$STACK_YAML_FILE" --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "$GITHUB_PATH"
 elif [[ "$RUNNER_OS" == "macOS" ]]; then

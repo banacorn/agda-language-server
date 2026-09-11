@@ -39,6 +39,10 @@ on:
         description: 'Smoke test: 1 entry per platform (Agda 2.8.0 only), rep 1 only, ~10 jobs total instead of 180. Validates wiring cheaply before a full run.'
         type: boolean
         default: false
+      fake:
+        description: 'Fake mode: skip real Stack/WASM toolchain setup and builds, substitute instant dummy files at the exact same cache paths/keys. Validates harness plumbing (matrix, keys, restore/save, warm survival check, settle, cleanup) in ~1 min per job instead of 20-90 min. Measurements are meaningless in this mode -- for wiring debugging only.'
+        type: boolean
+        default: false
 
 env:
   UPSTREAM_REPOSITORY: agda/agda-language-server
@@ -164,6 +168,7 @@ jobs:
     with:
       phase: cold
       rep: 1
+      fake: ${{ inputs.fake }}
       entries_json: ${{ needs.generate-matrix.outputs.entries_rep1 }}
       base_sha: ${{ inputs.base_sha }}
       redesign_sha: ${{ inputs.redesign_sha }}
@@ -181,6 +186,7 @@ jobs:
     with:
       phase: warm
       rep: 1
+      fake: ${{ inputs.fake }}
       entries_json: ${{ needs.generate-matrix.outputs.entries_rep1 }}
       base_sha: ${{ inputs.base_sha }}
       redesign_sha: ${{ inputs.redesign_sha }}
