@@ -109,15 +109,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Empirically (fake-mode probing, see cache-warm-debug work),
-          # Windows cache saves take noticeably longer than other OSes to
-          # become visible via the List Caches API -- observed up to
-          # ~110s after actions/cache/save reports success, vs a few
-          # seconds on ubuntu/macos. 20 attempts * 15s gives 5 minutes of
-          # margin over that observed worst case.
+          # Genuine ordinary margin for cache-save-to-listable propagation
+          # (a few seconds in practice, confirmed across all OSes once
+          # cache_list_all's Windows-only jq process-substitution bug was
+          # fixed -- see lib.sh). 6 attempts * 15s = 90s of headroom.
           source .github/scripts/cache-benchmark/lib.sh
           n=0
-          for attempt in $(seq 1 20); do
+          for attempt in $(seq 1 6); do
             n="$(cache_list_all "${BENCHMARK_REPOSITORY}" "${BENCH_PREFIX}" | jq 'length')"
             echo "attempt ${attempt}: found ${n} cache entries under prefix ${BENCH_PREFIX}"
             if [[ "$n" -gt 0 ]]; then
@@ -126,7 +124,7 @@ jobs:
             sleep 15
           done
           if [[ "$n" -eq 0 ]]; then
-            echo "::error::no cache entries survived from the cold run for pair '${PAIR_ID}' (prefix ${BENCH_PREFIX}) after 20 retries over 300s; this sample is invalid and must be discarded and re-run under a new pair id"
+            echo "::error::no cache entries survived from the cold run for pair '${PAIR_ID}' (prefix ${BENCH_PREFIX}) after 6 retries over 90s; this sample is invalid and must be discarded and re-run under a new pair id"
             echo "--- diagnostic: unfiltered cache list (first page) ---"
             gh api "repos/${BENCHMARK_REPOSITORY}/actions/caches" --method GET -F per_page=100 -F page=1 || true
             exit 1
