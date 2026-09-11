@@ -170,6 +170,12 @@ jobs:
     - name: 📥 Install the icu library (on Windows)
       if: runner.os == 'Windows'
       run: |
+        # -Sy refreshes the package database first: the GH Windows runner
+        # image ships a bundled MSYS2 db snapshot that can reference
+        # package versions mirrors have since pruned, causing "failed
+        # retrieving file ... 404" across every configured mirror despite
+        # the requested packages being entirely unversioned here.
+        stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
         stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-clang-x86_64-icu mingw-w64-clang-x86_64-pkgconf
 
     - name: 🛣️ Add MSYS2 clang64 bin to PATH (on Windows)
