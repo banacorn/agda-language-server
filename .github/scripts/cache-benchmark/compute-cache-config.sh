@@ -34,11 +34,15 @@ if [[ "$ENTRY_KIND" == "native" ]]; then
   if [[ "$SLOT" == "primary" ]]; then
     if [[ "$BENCH_STRATEGY" == "legacy" ]]; then
       paths="$(legacy_deps_paths "$STACK_ROOT")"
-      key="$(legacy_deps_key "$RUNNER_OS" "$RESOLVER" "$(sha256sum "$STACK_YAML" | cut -d' ' -f1)" "$AGDA_LABEL")"
+      key="$(legacy_deps_key "$RUNNER_OS" "$RESOLVER" "$(sha256sum "src/$STACK_YAML_FILE" | cut -d' ' -f1)" "$AGDA_LABEL")"
       restore_keys="$(legacy_deps_restore_keys "$RUNNER_OS" "$RESOLVER" "$AGDA_LABEL")"
       exact_only="false"
     else
-      config_hash="$(redesigned_config_hash "$STACK_YAML" "${STACK_YAML}.lock")"
+      # cache-policy.sh's redesigned_config_hash hashes package.yaml and
+      # agda-language-server.cabal as bare repo-root-relative paths (correct
+      # for production use); the benchmark harness checks the project out
+      # under src/, so run it from there instead of prefixing every path.
+      config_hash="$(cd src && redesigned_config_hash "$STACK_YAML_FILE" "${STACK_YAML_FILE}.lock")"
       echo "CONFIG_HASH=${config_hash}" >> "$GITHUB_ENV"
       paths="$(redesigned_deps_paths "$STACK_ROOT")"
       key="$(redesigned_deps_key "$RUNNER_OS" "$RUNNER_ARCH" "$STACK_VERSION" "$GHC_VERSION" "$ICU_VERSION" "$RESOLVER" "$AGDA_LABEL" "$config_hash")"
