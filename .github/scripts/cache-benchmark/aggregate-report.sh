@@ -54,7 +54,7 @@ for strategy in legacy redesigned; do
   echo "MODELED full-workflow critical-path wall-clock (max single-entry cold + max single-entry warm, not observed end-to-end): ${modeled_ms} ms" >> "$GITHUB_STEP_SUMMARY"
 
   final_rep_bytes="$(jq -r --arg s "$strategy" \
-    '[.[] | select(.key | startswith("ci-cache-benchmark-" + $s) and (.key | test("-rep3-")))] | [.[].size_in_bytes] | add // 0' <<<"$all_settles")"
+    '[.[] | select((.key | startswith("ci-cache-benchmark-" + $s)) and (.key | test("-rep3-")))] | [.[].size_in_bytes] | add // 0' <<<"$all_settles")"
   echo "Compressed cache bytes recorded at final repetition (rep 3) settle inventory: ${final_rep_bytes} bytes" >> "$GITHUB_STEP_SUMMARY"
   if [[ "$strategy" == "redesigned" ]]; then
     echo "_Benchmark-prefixed entries are excluded from the redesigned steady-state calculation by construction: this number is the benchmark measurement itself, not steady-state repository usage._" >> "$GITHUB_STEP_SUMMARY"
