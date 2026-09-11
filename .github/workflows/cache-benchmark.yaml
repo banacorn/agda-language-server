@@ -35,6 +35,10 @@ on:
       redesign_sha:
         description: 'Full 40-character commit SHA of the redesigned-cache source (REDESIGN_SHA)'
         required: true
+      smoke:
+        description: 'Smoke test: 1 entry per platform (Agda 2.8.0 only), rep 1 only, ~10 jobs total instead of 180. Validates wiring cheaply before a full run.'
+        type: boolean
+        default: false
 
 env:
   UPSTREAM_REPOSITORY: agda/agda-language-server
@@ -129,6 +133,8 @@ jobs:
 
       - name: Generate and split matrix
         id: gen
+        env:
+          SMOKE: ${{ inputs.smoke }}
         run: |
           set -euo pipefail
           chmod +x .github/scripts/cache-benchmark/generate-matrix.sh
@@ -197,6 +203,7 @@ jobs:
   cold-rep2:
     name: Cold / rep 2
     needs: [generate-matrix, settle-rep1]
+    if: inputs.smoke != true
     uses: ./.github/workflows/cache-benchmark-phase.yaml
     with:
       phase: cold
@@ -214,6 +221,7 @@ jobs:
   warm-rep2:
     name: Warm / rep 2
     needs: [generate-matrix, cold-rep2]
+    if: inputs.smoke != true
     uses: ./.github/workflows/cache-benchmark-phase.yaml
     with:
       phase: warm
@@ -231,6 +239,7 @@ jobs:
   settle-rep2:
     name: Settle / rep 2
     needs: [generate-matrix, warm-rep2]
+    if: inputs.smoke != true
     uses: ./.github/workflows/cache-benchmark-settle.yaml
     with:
       rep: 2
@@ -240,6 +249,7 @@ jobs:
   cold-rep3:
     name: Cold / rep 3
     needs: [generate-matrix, settle-rep2]
+    if: inputs.smoke != true
     uses: ./.github/workflows/cache-benchmark-phase.yaml
     with:
       phase: cold
@@ -257,6 +267,7 @@ jobs:
   warm-rep3:
     name: Warm / rep 3
     needs: [generate-matrix, cold-rep3]
+    if: inputs.smoke != true
     uses: ./.github/workflows/cache-benchmark-phase.yaml
     with:
       phase: warm
@@ -274,6 +285,7 @@ jobs:
   settle-rep3:
     name: Settle / rep 3
     needs: [generate-matrix, warm-rep3]
+    if: inputs.smoke != true
     uses: ./.github/workflows/cache-benchmark-settle.yaml
     with:
       rep: 3

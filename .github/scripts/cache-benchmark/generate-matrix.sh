@@ -23,7 +23,16 @@
 #              designated writer -- Agda 2.8.0 -- legacy groups race).
 #   pair_id    "<strategy>-<group>-rep<rep>", shared by every member of a
 #              group so they use one ci-cache-benchmark-<pair_id>- prefix.
+#
+# SMOKE=true (env) collapses this to a wiring smoke test: rep 1 only, and
+# only the Agda-2.8.0 entry per platform (so 5 base entries instead of
+# 15 -- one ubuntu, one windows, both macOS archs, one wasm -- still
+# covering every platform-specific code path and, since 2.8.0 is always
+# the designated writer, every save/restore/settle step, but not the
+# multi-entry macOS/WASM race or single-writer-among-peers behavior).
+# Skip this for measurements that are meant to be reported.
 set -euo pipefail
+SMOKE="${SMOKE:-false}"
 
 AGDA_NATIVE='[
   {"name":"2.8.0",   "label":"Agda-2.8.0"},
@@ -40,9 +49,10 @@ AGDA_WASM='[
 jq -n \
   --argjson agda_native "$AGDA_NATIVE" \
   --argjson agda_wasm "$AGDA_WASM" \
+  --argjson smoke "$([[ "$SMOKE" == "true" ]] && echo true || echo false)" \
   '
   def strategies: ["legacy", "redesigned"];
-  def reps: [1, 2, 3];
+  def reps: if $smoke then [1] else [1, 2, 3] end;
 
   def ungrouped_native:
     [
@@ -86,9 +96,11 @@ jq -n \
       };
 
   [ungrouped_native, grouped_macos, grouped_wasm] as $bases
-  | ($bases | flatten) as $entries
+  | ($bases | flatten) as $all_entries
+  | ($all_entries | if $smoke then map(select(.agda_name == "2.8.0")) else . end) as $entries
   | ($entries | length) as $n
-  | if $n != 15 then error("expected 15 base entries, got \($n)") else . end
+  | (if $smoke then 5 else 15 end) as $expected_n
+  | if $n != $expected_n then error("expected \($expected_n) base entries, got \($n)") else . end
   | [
       strategies[] as $strategy
       | reps[] as $rep
@@ -110,5 +122,6 @@ jq -n \
           prefix: ("ci-cache-benchmark-" + $pair_id + "-")
         }
     ]
-  | if length != 90 then error("expected 90 matrix entries, got \(length)") else . end
+  | (if $smoke then $expected_n * 2 * 1 else 90 end) as $expected_total
+  | if length != $expected_total then error("expected \($expected_total) matrix entries, got \(length)") else . end
   '
