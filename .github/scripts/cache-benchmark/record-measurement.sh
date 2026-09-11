@@ -3,7 +3,7 @@
 #
 # Appends a row to the job summary and writes the full measurement as JSON
 # to OUTPUT_JSON_PATH, from env vars set by the calling job:
-#   ENTRY_ID STRATEGY REP PHASE PAIR_ID PREFIX
+#   ENTRY_ID BENCH_STRATEGY BENCH_REP BENCH_PHASE PAIR_ID BENCH_PREFIX
 #   PRIMARY_KEY PRIMARY_CACHE_HIT PRIMARY_CACHE_MATCHED_KEY PRIMARY_RESTORE_MS PRIMARY_SIZE_BYTES
 #   SECONDARY_ACTIVE SECONDARY_KEY SECONDARY_CACHE_HIT SECONDARY_CACHE_MATCHED_KEY SECONDARY_RESTORE_MS SECONDARY_SIZE_BYTES
 #   BUILD_MS SAVE_MS
@@ -29,11 +29,11 @@ fi
 
 jq -n \
   --arg entry_id "$ENTRY_ID" \
-  --arg strategy "$STRATEGY" \
-  --argjson rep "$REP" \
-  --arg phase "$PHASE" \
+  --arg strategy "$BENCH_STRATEGY" \
+  --argjson rep "$BENCH_REP" \
+  --arg phase "$BENCH_PHASE" \
   --arg pair_id "$PAIR_ID" \
-  --arg prefix "$PREFIX" \
+  --arg prefix "$BENCH_PREFIX" \
   --arg primary_key "${PRIMARY_KEY:-}" \
   --arg primary_matched_key "${PRIMARY_CACHE_MATCHED_KEY:-}" \
   --arg primary_status "$primary_status" \
@@ -65,5 +65,5 @@ jq -n \
   }' > "$OUT"
 
 {
-  echo "| ${ENTRY_ID} | ${STRATEGY} | ${REP} | ${PHASE} | primary:${primary_status} | secondary:${secondary_status} | restore ${PRIMARY_RESTORE_MS:-0}ms | build ${BUILD_MS:-0}ms | save ${SAVE_MS:-0}ms |"
+  echo "| ${ENTRY_ID} | ${BENCH_STRATEGY} | ${BENCH_REP} | ${BENCH_PHASE} | primary:${primary_status} | secondary:${secondary_status} | restore ${PRIMARY_RESTORE_MS:-0}ms | build ${BUILD_MS:-0}ms | save ${SAVE_MS:-0}ms |"
 } >> "$GITHUB_STEP_SUMMARY"

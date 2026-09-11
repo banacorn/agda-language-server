@@ -32,7 +32,7 @@ join_lines() { printf '%s\n' "$@"; }
 
 if [[ "$ENTRY_KIND" == "native" ]]; then
   if [[ "$SLOT" == "primary" ]]; then
-    if [[ "$STRATEGY" == "legacy" ]]; then
+    if [[ "$BENCH_STRATEGY" == "legacy" ]]; then
       paths="$(legacy_deps_paths "$STACK_ROOT")"
       key="$(legacy_deps_key "$RUNNER_OS" "$RESOLVER" "$(sha256sum "$STACK_YAML" | cut -d' ' -f1)" "$AGDA_LABEL")"
       restore_keys="$(legacy_deps_restore_keys "$RUNNER_OS" "$RESOLVER" "$AGDA_LABEL")"
@@ -47,8 +47,8 @@ if [[ "$ENTRY_KIND" == "native" ]]; then
     fi
     emit PRIMARY_ACTIVE "true"
     emit PRIMARY_PATHS "$paths"
-    emit PRIMARY_KEY "${PREFIX}${key}"
-    emit PRIMARY_RESTORE_KEYS "${restore_keys:+${PREFIX}${restore_keys}}"
+    emit PRIMARY_KEY "${BENCH_PREFIX}${key}"
+    emit PRIMARY_RESTORE_KEYS "${restore_keys:+${BENCH_PREFIX}${restore_keys}}"
     emit PRIMARY_EXACT_ONLY "$exact_only"
   else
     # Toolchain cache: only active on macOS in both policies.
@@ -58,35 +58,35 @@ if [[ "$ENTRY_KIND" == "native" ]]; then
       emit SECONDARY_KEY ""
       emit SECONDARY_RESTORE_KEYS ""
       emit SECONDARY_EXACT_ONLY "false"
-    elif [[ "$STRATEGY" == "legacy" ]]; then
+    elif [[ "$BENCH_STRATEGY" == "legacy" ]]; then
       paths="$(legacy_toolchain_paths)"
       key="$(legacy_toolchain_key "$RUNNER_OS" "$RUNNER_ARCH" "$GHC_VERSION")"
       restore_keys="$(legacy_toolchain_restore_keys "$RUNNER_OS" "$RUNNER_ARCH" "$GHC_VERSION" | paste -sd'\n' -)"
       emit SECONDARY_ACTIVE "true"
       emit SECONDARY_PATHS "$paths"
-      emit SECONDARY_KEY "${PREFIX}${key}"
-      emit SECONDARY_RESTORE_KEYS "$(printf '%s\n' "$restore_keys" | sed "s/^/${PREFIX}/")"
+      emit SECONDARY_KEY "${BENCH_PREFIX}${key}"
+      emit SECONDARY_RESTORE_KEYS "$(printf '%s\n' "$restore_keys" | sed "s/^/${BENCH_PREFIX}/")"
       emit SECONDARY_EXACT_ONLY "false"
     else
       paths="$(redesigned_toolchain_paths)"
       key="$(redesigned_toolchain_key "$RUNNER_OS" "$RUNNER_ARCH" "$STACK_VERSION" "$GHC_VERSION")"
       emit SECONDARY_ACTIVE "true"
       emit SECONDARY_PATHS "$paths"
-      emit SECONDARY_KEY "${PREFIX}${key}"
+      emit SECONDARY_KEY "${BENCH_PREFIX}${key}"
       emit SECONDARY_RESTORE_KEYS ""
       emit SECONDARY_EXACT_ONLY "true"
     fi
   fi
 else # wasm
   if [[ "$SLOT" == "primary" ]]; then
-    if [[ "$STRATEGY" == "legacy" ]]; then
+    if [[ "$BENCH_STRATEGY" == "legacy" ]]; then
       paths="$(legacy_wasm_toolchain_paths)"
       key="$(legacy_wasm_toolchain_key "$RUNNER_OS" "$RUNNER_ARCH" "$GHC_WASM_META_COMMIT_HASH" "$GHC_WASM_META_FLAVOUR")"
       restore_keys="$(legacy_wasm_toolchain_restore_keys "$RUNNER_OS" "$RUNNER_ARCH")"
       emit PRIMARY_ACTIVE "true"
       emit PRIMARY_PATHS "$paths"
-      emit PRIMARY_KEY "${PREFIX}${key}"
-      emit PRIMARY_RESTORE_KEYS "${PREFIX}${restore_keys}"
+      emit PRIMARY_KEY "${BENCH_PREFIX}${key}"
+      emit PRIMARY_RESTORE_KEYS "${BENCH_PREFIX}${restore_keys}"
       emit PRIMARY_EXACT_ONLY "false"
     else
       producer_hash="$(wasm_toolchain_producer_hash "$GHC_WASM_META_COMMIT_HASH" "$GHC_WASM_META_FLAVOUR")"
@@ -95,19 +95,19 @@ else # wasm
       key="$(redesigned_wasm_toolchain_key "$RUNNER_OS" "$RUNNER_ARCH" "$producer_hash")"
       emit PRIMARY_ACTIVE "true"
       emit PRIMARY_PATHS "$paths"
-      emit PRIMARY_KEY "${PREFIX}${key}"
+      emit PRIMARY_KEY "${BENCH_PREFIX}${key}"
       emit PRIMARY_RESTORE_KEYS ""
       emit PRIMARY_EXACT_ONLY "true"
     fi
   else
-    if [[ "$STRATEGY" == "legacy" ]]; then
+    if [[ "$BENCH_STRATEGY" == "legacy" ]]; then
       paths="$(join_lines "$HOME/.config/cabal" "$HOME/.cache/cabal")"
       key="native-cabal-${RUNNER_OS}-${RUNNER_ARCH}-${GHC_WASM_META_COMMIT_HASH}-flavor-${GHC_WASM_META_FLAVOUR}"
       restore_keys="native-cabal-${RUNNER_OS}-${RUNNER_ARCH}-"
       emit SECONDARY_ACTIVE "true"
       emit SECONDARY_PATHS "$paths"
-      emit SECONDARY_KEY "${PREFIX}${key}"
-      emit SECONDARY_RESTORE_KEYS "${PREFIX}${restore_keys}"
+      emit SECONDARY_KEY "${BENCH_PREFIX}${key}"
+      emit SECONDARY_RESTORE_KEYS "${BENCH_PREFIX}${restore_keys}"
       emit SECONDARY_EXACT_ONLY "false"
     else
       producer_hash="$(native_utils_producer_hash "$CABAL_VERSION" "$ALEX_VERSION" "$HAPPY_VERSION")"
@@ -116,7 +116,7 @@ else # wasm
       key="$(redesigned_native_utils_key "$RUNNER_OS" "$RUNNER_ARCH" "$producer_hash")"
       emit SECONDARY_ACTIVE "true"
       emit SECONDARY_PATHS "$paths"
-      emit SECONDARY_KEY "${PREFIX}${key}"
+      emit SECONDARY_KEY "${BENCH_PREFIX}${key}"
       emit SECONDARY_RESTORE_KEYS ""
       emit SECONDARY_EXACT_ONLY "true"
     fi

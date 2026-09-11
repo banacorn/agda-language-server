@@ -77,18 +77,18 @@ jobs:
           {
             echo "ENTRY_ID=${{ matrix.id }}"
             echo "ENTRY_KIND=${{ matrix.kind }}"
-            echo "STRATEGY=${{ matrix.strategy }}"
-            echo "REP=${{ inputs.rep }}"
-            echo "ARCH=${{ matrix.arch }}"
+            echo "BENCH_STRATEGY=${{ matrix.strategy }}"
+            echo "BENCH_REP=${{ inputs.rep }}"
+            echo "BENCH_ARCH=${{ matrix.arch }}"
             echo "AGDA_NAME=${{ matrix.agda_name }}"
             echo "AGDA_LABEL=${{ matrix.agda_label }}"
             echo "AGDA_FLAG=${{ matrix.agda_flag }}"
             echo "AGDA_COMMIT=${{ matrix.agda_commit }}"
-            echo "GROUP=${{ matrix.group }}"
+            echo "BENCH_GROUP=${{ matrix.group }}"
             echo "IS_WRITER=${{ matrix.is_writer }}"
             echo "PAIR_ID=${{ matrix.pair_id }}"
-            echo "PREFIX=${{ matrix.prefix }}"
-            echo "PHASE=${{ inputs.phase }}"
+            echo "BENCH_PREFIX=${{ matrix.prefix }}"
+            echo "BENCH_PHASE=${{ inputs.phase }}"
             echo "RUNNER_OS=${{ runner.os }}"
             echo "RUNNER_ARCH=${{ runner.arch }}"
             echo "BENCHMARK_REPOSITORY=${{ inputs.benchmark_repository }}"
@@ -105,10 +105,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           source .github/scripts/cache-benchmark/lib.sh
-          n="$(cache_list_all "${BENCHMARK_REPOSITORY}" "${PREFIX}" | jq 'length')"
-          echo "found ${n} cache entries under prefix ${PREFIX} before warm run"
+          n="$(cache_list_all "${BENCHMARK_REPOSITORY}" "${BENCH_PREFIX}" | jq 'length')"
+          echo "found ${n} cache entries under prefix ${BENCH_PREFIX} before warm run"
           if [[ "$n" -eq 0 ]]; then
-            echo "::error::no cache entries survived from the cold run for pair '${PAIR_ID}' (prefix ${PREFIX}); this sample is invalid and must be discarded and re-run under a new pair id"
+            echo "::error::no cache entries survived from the cold run for pair '${PAIR_ID}' (prefix ${BENCH_PREFIX}); this sample is invalid and must be discarded and re-run under a new pair id"
             exit 1
           fi
 
@@ -157,7 +157,7 @@ jobs:
         run: |
           actual="$(stack --numeric-version)"
           echo "resolved Stack version: ${actual}"
-          if [[ "${STRATEGY}" == "redesigned" && "${actual}" != "${STACK_VERSION}" ]]; then
+          if [[ "${BENCH_STRATEGY}" == "redesigned" && "${actual}" != "${STACK_VERSION}" ]]; then
             echo "::error::redesigned policy requires pinned Stack ${STACK_VERSION}, got ${actual}"
             exit 1
           fi
