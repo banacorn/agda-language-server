@@ -8,8 +8,13 @@ compiler-check: newer-minor
 # -- pays a redundant full GHC download+configure (measured: ~90s on
 # Linux, ~500s+ on macOS), since ~/.stack/programs is untracked by the
 # cache and Stack is otherwise unaware the ghcup-installed GHC exists.
+# install-ghc deliberately left at its default (true): Stack tries
+# system-ghc first and only falls back to install-ghc when no match is
+# found, so it's a no-op here since the pinned GHC always matches
+# exactly -- but disabling it outright also disables Stack's Windows
+# MSYS2 provisioning (where `pacman` lives), which the ICU/pkgconf
+# install genuinely needs and which ghcup does not provide.
 system-ghc: true
-install-ghc: false
 
 packages:
 - .
