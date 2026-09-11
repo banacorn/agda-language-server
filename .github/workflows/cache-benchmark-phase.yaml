@@ -183,7 +183,16 @@ jobs:
 
       - name: Determine Stack root (fake)
         if: matrix.kind == 'native' && inputs.fake == true
-        run: echo "STACK_ROOT=$HOME/.fake-stack-root" >> "$GITHUB_ENV"
+        run: |
+          # actions/cache needs native Windows paths there (real
+          # `stack path --stack-root` already returns one); bash's $HOME
+          # on Windows runners is the POSIX-style /c/Users/... mount
+          # path, which actions/cache's path-validation step rejects.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "STACK_ROOT=$(cygpath -w "$HOME/.fake-stack-root")" >> "$GITHUB_ENV"
+          else
+            echo "STACK_ROOT=$HOME/.fake-stack-root" >> "$GITHUB_ENV"
+          fi
 
       - name: Resolve ICU version
         if: matrix.kind == 'native'
