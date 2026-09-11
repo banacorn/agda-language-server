@@ -135,6 +135,12 @@ jobs:
       - name: Install yq (Windows)
         if: matrix.kind == 'native' && runner.os == 'Windows'
         uses: frenck/action-setup-yq@v1
+        with:
+          # Pinned: the default `version: latest` makes an anonymous,
+          # unauthenticated call to api.github.com to resolve the tag,
+          # which is a known flaky failure point on shared GH-runner IPs
+          # (60 req/hr anonymous quota) -- observed failing this session.
+          version: v4.53.6
 
       - name: Resolve Stack config for this Agda target
         if: matrix.kind == 'native'
