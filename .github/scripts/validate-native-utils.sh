@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # validate-native-utils.sh
 #
-# Redesigned policy only. Resolves alex/happy to canonical paths, asserts
-# both are inside the restored native-utilities payload
-# ($HOME/.ghc-wasm/cabal/bin), and asserts both report the pinned
+# Resolves alex/happy to canonical paths, asserts both are inside the
+# restored native-utilities payload (NATIVE_UTILS_DIR, default
+# $HOME/.ghc-wasm/native-utils), and asserts both report the pinned
 # ALEX_VERSION/HAPPY_VERSION. Fails the job on any mismatch rather than
 # silently accepting a runner-provided binary that happens to be on PATH.
 set -euo pipefail
 
-payload_dir="$HOME/.ghc-wasm/cabal/bin"
+payload_dir="${NATIVE_UTILS_DIR:-$HOME/.ghc-wasm/native-utils}"
 
 check_tool() {
   local name="$1" expected_version="$2" version_flag="$3"

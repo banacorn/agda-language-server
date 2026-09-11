@@ -334,20 +334,28 @@ jobs:
           ~/.ghc-wasm/cabal/bin/cabal update
           ~/.ghc-wasm/cabal/bin/cabal install "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
 
+      - name: Add native-utilities dir to PATH (redesigned, exact hit)
+        if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit == 'true'
+        run: echo "$HOME/.ghc-wasm/native-utils" >> "$GITHUB_PATH"
+
       - name: Validate restored native utilities (redesigned, exact hit)
         if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit == 'true'
-        run: bash .github/scripts/cache-benchmark/validate-native-utils.sh
+        run: bash .github/scripts/validate-native-utils.sh
 
       - name: Install native utilities (redesigned, on exact miss)
         if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.restore-secondary-wasm.outputs.cache-hit != 'true'
         id: install-native-utils
         run: |
           ~/.ghc-wasm/cabal/bin/cabal update
-          ~/.ghc-wasm/cabal/bin/cabal install "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
+          mkdir -p "$HOME/.ghc-wasm/native-utils"
+          ~/.ghc-wasm/cabal/bin/cabal install \
+            --installdir="$HOME/.ghc-wasm/native-utils" --install-method=copy --overwrite-policy=always \
+            "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
+          echo "$HOME/.ghc-wasm/native-utils" >> "$GITHUB_PATH"
 
       - name: Validate installed native utilities (redesigned, after install)
         if: matrix.kind == 'wasm' && matrix.strategy == 'redesigned' && steps.install-native-utils.outcome == 'success'
-        run: bash .github/scripts/cache-benchmark/validate-native-utils.sh
+        run: bash .github/scripts/validate-native-utils.sh
 
       - name: Checkout Agda submodule at pinned commit
         if: matrix.kind == 'wasm'

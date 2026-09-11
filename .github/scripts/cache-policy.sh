@@ -125,11 +125,14 @@ redesigned_wasm_toolchain_key() {
 # ---- WASM: native utilities (alex/happy) -----------------------------------
 
 redesigned_native_utils_paths() {
-  # Everything required to execute the pinned alex/happy: their installed
-  # binaries plus the native cabal store that owns them. Mutable Cabal
-  # index contents are deliberately excluded -- they are not part of
-  # producer identity.
-  printf '%s\n' "$HOME/.ghc-wasm/cabal/bin" "$HOME/.ghc-wasm/cabal/store"
+  # alex/happy are installed with `cabal install --installdir=... \
+  # --install-method=copy`, into a dedicated directory this cache owns
+  # exclusively, so the payload is exactly "their installed binaries" --
+  # self-contained copies that don't need cabal's store to run. The
+  # mutable Cabal index (~/.config/cabal, ~/.cache/cabal) is deliberately
+  # excluded: it is not part of producer identity, and `cabal update`
+  # runs fresh on every use regardless of cache state.
+  printf '%s\n' "$HOME/.ghc-wasm/native-utils"
 }
 
 # NATIVE_UTILITIES_PRODUCER_HASH covers its cache schema, host
