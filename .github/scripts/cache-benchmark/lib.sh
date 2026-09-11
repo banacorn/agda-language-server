@@ -4,43 +4,45 @@
 # steps; requires `gh`, `jq`, and GH_TOKEN in the environment.
 set -euo pipefail
 
-# cache_list_page REPO KEY_PREFIX PAGE
-# Prints one page (100 entries) of the cache list JSON payload as-is.
+# cache_list_page REPO PAGE
+# Prints one unfiltered page (100 entries) of the cache list JSON payload.
 #
-# The "_" query param is a cache-busting nonce: a fixed-URL GET here was
-# observed to return a stale (empty) result for several minutes after a
-# genuinely successful save, specifically on Windows runners, while the
-# same query from ubuntu/macOS runners (and gh api calls made from
-# outside any runner entirely) saw the fresh result immediately. That
-# points at an HTTP-level cache sitting in front of api.github.com on the
-# Windows runner image's egress path, not an eventual-consistency issue
-# in GitHub's cache backend itself -- so vary the URL on every call.
+# Deliberately does NOT use the API's server-side "key" prefix filter
+# (`-f key=...`): on Windows runners specifically, a key-filtered query
+# was observed to reliably return 0 matches for over 5 minutes after a
+# confirmed-successful save, while an unfiltered listing from the exact
+# same job/runner/token found the entry immediately, and ubuntu/macOS
+# runners never showed the problem with the filter at all. That points
+# at a bug/inconsistency in the server-side key-filter's index
+# specifically, not general propagation lag or an HTTP cache -- so this
+# always fetches the full unfiltered list and filters client-side
+# instead (see cache_list_all).
 cache_list_page() {
-  local repo="$1" prefix="$2" page="$3"
+  local repo="$1" page="$2"
   gh api "repos/${repo}/actions/caches" \
     --method GET \
-    -f "key=${prefix}" \
     -F "per_page=100" \
-    -F "page=${page}" \
-    -F "_=${RANDOM}${RANDOM}${RANDOM}"
+    -F "page=${page}"
 }
 
 # cache_list_all REPO KEY_PREFIX
-# Fully paginates until the number of collected entries equals total_count.
-# Prints a JSON array of cache objects (id, key, ref, size_in_bytes, ...).
+# Fully paginates the unfiltered cache list until every entry has been
+# seen, then filters client-side by key prefix. Prints a JSON array of
+# matching cache objects (id, key, ref, size_in_bytes, ...).
 cache_list_all() {
   local repo="$1" prefix="$2"
-  local page=1 total=-1 collected="[]"
+  local page=1 total=-1 seen=0 collected="[]"
   while :; do
     local resp
-    resp="$(cache_list_page "$repo" "$prefix" "$page")"
+    resp="$(cache_list_page "$repo" "$page")"
     total="$(jq -r '.total_count' <<<"$resp")"
-    local batch
-    batch="$(jq -c '.actions_caches' <<<"$resp")"
-    collected="$(jq -c -s '.[0] + .[1]' <(echo "$collected") <(echo "$batch"))"
-    local n
-    n="$(jq 'length' <<<"$collected")"
-    if [[ "$n" -ge "$total" ]] || [[ "$(jq 'length' <<<"$batch")" -eq 0 ]]; then
+    local batch_all batch_n matched
+    batch_all="$(jq -c '.actions_caches' <<<"$resp")"
+    batch_n="$(jq 'length' <<<"$batch_all")"
+    seen=$((seen + batch_n))
+    matched="$(jq -c --arg p "$prefix" '[.[] | select(.key | startswith($p))]' <<<"$batch_all")"
+    collected="$(jq -c -s '.[0] + .[1]' <(echo "$collected") <(echo "$matched"))"
+    if [[ "$seen" -ge "$total" ]] || [[ "$batch_n" -eq 0 ]]; then
       break
     fi
     page=$((page + 1))
