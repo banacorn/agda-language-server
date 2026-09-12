@@ -21,14 +21,25 @@ elif [[ "$RUNNER_OS" == "Windows" ]]; then
   # across every configured mirror (observed this session) despite the
   # requested packages being entirely unversioned in this command.
   #
-  # mingw64, not clang64: with system-ghc: true, Cabal's configure step
-  # (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs pointing
-  # at Stack's bundled msys2/mingw64 tree regardless of which MSYS2
-  # subsystem we install into, so the packages actually used by the
-  # linker must live under mingw64, not clang64 (clang64 only matched
-  # Stack's own now-unused install-ghc-provisioned toolchain).
+  # Which MSYS2 subsystem to install into depends on which toolchain
+  # Stack actually ends up using, which differs by strategy in THIS
+  # harness only (production always has system-ghc: true, see
+  # test.yaml): the "legacy" strategy is checked out at a commit
+  # without system-ghc: true and skips haskell-actions/setup on
+  # Windows entirely, so Stack falls back to its own
+  # install-ghc-provisioned toolchain, which defaults Cabal's
+  # --extra-include-dirs/--extra-lib-dirs to the bundled msys2/clang64
+  # tree. The "redesigned" strategy has system-ghc: true, so Cabal's
+  # configure step instead hardcodes msys2/mingw64. Installing into the
+  # wrong subsystem leaves pkg-config unfindable at the paths Cabal
+  # actually passes.
+  if [[ "${BENCH_STRATEGY:-}" == "legacy" ]]; then
+    pkg_prefix=mingw-w64-clang-x86_64
+  else
+    pkg_prefix=mingw-w64-x86_64
+  fi
   stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -Sy --noconfirm
-  stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
+  stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -S --noconfirm "${pkg_prefix}-icu" "${pkg_prefix}-pkgconf"
   stack path --stack-yaml "$STACK_YAML_FILE" --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "$GITHUB_PATH"
 elif [[ "$RUNNER_OS" == "macOS" ]]; then
   echo "PKG_CONFIG_PATH=$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "$GITHUB_ENV"
