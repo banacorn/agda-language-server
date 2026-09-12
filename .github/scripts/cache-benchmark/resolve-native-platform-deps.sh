@@ -20,8 +20,15 @@ elif [[ "$RUNNER_OS" == "Windows" ]]; then
   # mirrors have since pruned, causing "failed retrieving file ... 404"
   # across every configured mirror (observed this session) despite the
   # requested packages being entirely unversioned in this command.
+  #
+  # mingw64, not clang64: with system-ghc: true, Cabal's configure step
+  # (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs pointing
+  # at Stack's bundled msys2/mingw64 tree regardless of which MSYS2
+  # subsystem we install into, so the packages actually used by the
+  # linker must live under mingw64, not clang64 (clang64 only matched
+  # Stack's own now-unused install-ghc-provisioned toolchain).
   stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -Sy --noconfirm
-  stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -S --noconfirm mingw-w64-clang-x86_64-icu mingw-w64-clang-x86_64-pkgconf
+  stack exec --stack-yaml "$STACK_YAML_FILE" -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
   stack path --stack-yaml "$STACK_YAML_FILE" --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "$GITHUB_PATH"
 elif [[ "$RUNNER_OS" == "macOS" ]]; then
   echo "PKG_CONFIG_PATH=$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "$GITHUB_ENV"
