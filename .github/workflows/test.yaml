@@ -14,7 +14,17 @@ env:
 
 on:
   push:
-    branches: [master]
+    # 'ci-*' (fork-only, temporary): lets a single push run both this
+    # workflow and wasm.yaml (which triggers on 'wasm'/'wasm-*') for
+    # fork-based CI-change iteration, without touching master or opening a
+    # PR. The five cache-save gates below (toolchain, compiled-dependency,
+    # WASM toolchain, native-utils, WASM dist-newstyle) are loosened the
+    # same way so warm-cache behavior is actually testable here -- but
+    # release-creation/upload gates are deliberately left untouched, so a
+    # 'ci-*' push never creates or uploads a release. Not meant to be
+    # upstreamed -- remove before proposing any of this branch's changes to
+    # origin.
+    branches: [master, 'ci-*']
     tags:
       - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
   pull_request:
@@ -185,7 +195,7 @@ jobs:
     - name: 💾 Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)
       if: >
         runner.os == 'macOS' && matrix.agda == 'Agda-2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-')) &&
         steps.haskell-toolchain.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
@@ -281,7 +291,7 @@ jobs:
 
     - name: 💾 Save compiled-dependency cache
       if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-')) &&
         steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' &&
         steps.stack-snapshot.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
@@ -581,7 +591,7 @@ jobs:
     - name: Cache ghc-wasm-meta (Agda 2.8.0 is the sole writer)
       if: >
         matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-')) &&
         steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true' &&
         steps.validate-wasm-toolchain.outcome == 'success'
       uses: actions/cache/save@v4
@@ -666,7 +676,7 @@ jobs:
     - name: Cache native utilities (Agda 2.8.0 is the sole writer)
       if: >
         matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-')) &&
         steps.native-utils-cache-restore.outputs.cache-hit != 'true' &&
         steps.install-native-utils.outcome == 'success'
       uses: actions/cache/save@v4
@@ -739,7 +749,7 @@ jobs:
     - name: Cache dist-newstyle
       uses: actions/cache/save@v4
       if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-')) &&
         steps.build-deps-other-than-agda.outcome == 'success'
       with:
         path: als/dist-newstyle

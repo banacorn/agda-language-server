@@ -2,7 +2,12 @@ name: Compile WASM
 
 on:
   push:
-    branches: [wasm, wasm-*]
+    # 'ci-*' (fork-only, temporary): lets a single push run both this
+    # workflow and test.yaml (which triggers on 'master') for fork-based
+    # CI-change iteration, without touching master or opening a PR. Not
+    # meant to be upstreamed -- remove before proposing any of this
+    # branch's changes to origin.
+    branches: [wasm, wasm-*, 'ci-*']
   pull_request:
     branches: [wasm, wasm-*]
 
@@ -258,7 +263,7 @@ jobs:
       uses: actions/cache/save@v4
       if: >
         github.event_name == 'push' &&
-        (github.ref == 'refs/heads/wasm' || startsWith(github.ref, 'refs/heads/wasm-')) &&
+        (github.ref == 'refs/heads/wasm' || startsWith(github.ref, 'refs/heads/wasm-') || startsWith(github.ref, 'refs/heads/ci-')) &&
         steps.build-deps-other-than-agda.outcome == 'success'
       with:
         path: als/dist-newstyle
