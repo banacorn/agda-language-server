@@ -121,7 +121,10 @@ jobs:
         install_name_tool -change "$ref" "$target" leak/als
         codesign -f -s - leak/als
         otool -L leak/als | grep icu
-        echo "LEAK_TARGET=$target" >> "$GITHUB_ENV"
+        # dyld reports the resolved file (under Cellar), not the opt/ symlink.
+        resolved=$(python -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$target")
+        echo "resolves to $resolved"
+        echo "LEAK_TARGET=$resolved" >> "$GITHUB_ENV"
 
     - name: "E1 (macOS): old check-artifact-runs.sh does not notice"
       if: runner.os == 'macOS'
