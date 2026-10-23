@@ -367,7 +367,12 @@ def main():
         "--timeout", type=float, default=DEFAULT_TIMEOUT, help="timeout in seconds (default: %(default)s)"
     )
     parser.add_argument("--startup-only", action="store_true", help="check --version instead of LSP")
+    parser.add_argument(
+        "--expect-missing-dll", action="store_true", help="require STATUS_DLL_NOT_FOUND (Windows startup control)"
+    )
     args = parser.parse_args()
+    if args.expect_missing_dll and (not args.startup_only or sys.platform != "win32"):
+        parser.error("--expect-missing-dll requires --startup-only on Windows")
 
     probe = Probe(args.als_path, args.fixture_path, args.timeout)
     try:
@@ -384,6 +389,11 @@ def main():
             log("startup exit: %s (0x%08X)" % (result.returncode, result.returncode & 0xFFFFFFFF))
             log("stdout: %s" % result.stdout)
             log("stderr: %s" % result.stderr)
+            if args.expect_missing_dll:
+                if result.returncode & 0xFFFFFFFF != 0xC0000135:
+                    raise ProbeFailure("expected STATUS_DLL_NOT_FOUND after removing a bundled runtime")
+                log("PASS: missing runtime detected")
+                return
             if result.returncode != 0:
                 raise ProbeFailure("packaged executable failed to start")
             log("PASS: packaged executable started")

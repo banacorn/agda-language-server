@@ -510,6 +510,11 @@ jobs:
         cp (ls $mingw64bin *libicudt*) zip/
         cp (ls $mingw64bin *libicuin*) zip/
         cp (ls $mingw64bin *libicuuc*) zip/
+        # ICU imports these runtimes. Use the same toolchain as ICU so
+        # runner-provided DLLs cannot hide missing or incompatible exports.
+        foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+          cp (Join-Path $mingw64bin $runtime) zip/ -ErrorAction Stop
+        }
         ls zip
 
         # compress
@@ -644,6 +649,23 @@ jobs:
         [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
         python .github/scripts/check-artifact-lsp.py "$als" test/data/Unicode.agda
 
+    - name: 🧪 Verify missing Windows runtimes are detected
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $stash = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/als-runtime-control" -Force
+        foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+          $source = Join-Path 'release' $runtime
+          $hidden = Join-Path $stash.FullName $runtime
+          Move-Item $source $hidden
+          try {
+            python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only --expect-missing-dll
+            if ($LASTEXITCODE -ne 0) { throw "Missing-DLL control failed for $runtime" }
+          } finally {
+            Move-Item $hidden $source
+          }
+        }
+
   build-wasm:
     if: github.ref != 'refs/heads/fix/windows-runtime-packaging'
     name: Build WASM
@@ -737,7 +759,7 @@ jobs:
     - name: Cache ghc-wasm-meta (Agda 2.8.0 is the sole writer)
       if: >
         matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/fix/windows-runtime-packaging') &&
+        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
         steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true' &&
         steps.validate-wasm-toolchain.outcome == 'success'
       uses: actions/cache/save@v4
@@ -822,7 +844,7 @@ jobs:
     - name: Cache native utilities (Agda 2.8.0 is the sole writer)
       if: >
         matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/fix/windows-runtime-packaging') &&
+        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
         steps.native-utils-cache-restore.outputs.cache-hit != 'true' &&
         steps.install-native-utils.outcome == 'success'
       uses: actions/cache/save@v4
@@ -947,7 +969,7 @@ jobs:
     - name: Cache dist-newstyle
       uses: actions/cache/save@v4
       if: >
-        github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/fix/windows-runtime-packaging') &&
+        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
         steps.build-deps-other-than-agda.outcome == 'success' &&
         steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit != 'true'
       with:
@@ -956,7 +978,7 @@ jobs:
 
     - name: Save cabal global store cache
       if: >
-        github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/fix/windows-runtime-packaging') &&
+        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
         steps.cabal-store-cache-restore.outputs.cache-hit != 'true' &&
         steps.build-deps-other-than-agda.outcome == 'success'
       uses: actions/cache/save@v4
