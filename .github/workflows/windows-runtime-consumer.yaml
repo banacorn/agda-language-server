@@ -1,0 +1,52 @@
+name: Windows Runtime Consumer Experiment
+on:
+  push:
+    branches: [probe/windows-runtime-packaging]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  consume:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agda: ['2.6.4.3', '2.7.0.1']
+        package: [baseline, fixed]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: als-Agda-${{ matrix.agda }}-windows
+          path: download
+          run-id: ${{ matrix.package == 'baseline' && '39896011479' || '39900060689' }}
+          github-token: ${{ github.token }}
+      - name: Extract the actual CI archive
+        shell: pwsh
+        run: |
+          python -m zipfile -e download/als-Agda-${{ matrix.agda }}-windows.zip release
+          Get-FileHash download/*.zip -Algorithm SHA256
+          Get-ChildItem release/*.dll
+      - name: Start with system-only child PATH
+        run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only
+      - name: Initialize and complete an Agda load
+        run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda
+      - name: Remove each runtime and require STATUS_DLL_NOT_FOUND
+        if: matrix.package == 'fixed'
+        shell: pwsh
+        run: |
+          $stash = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/als-runtime-control" -Force
+          foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            $source = Join-Path 'release' $runtime
+            $hidden = Join-Path $stash.FullName $runtime
+            Move-Item $source $hidden
+            try {
+              python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only --expect-missing-dll
+              if ($LASTEXITCODE -ne 0) { throw "Missing-DLL control failed for $runtime" }
+            } finally {
+              Move-Item $hidden $source
+            }
+          }
