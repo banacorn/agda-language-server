@@ -1,0 +1,63 @@
+name: Probe macOS toolchain
+
+# Experiment, lives only on the fork's probe/unix-isolation branch.
+#
+# macos-latest builds fail to link with GHC 9.10.2:
+#   ld: tapi error: malformed file
+#   .../CommandLineTools/SDKs/MacOSX27.0.sdk/usr/lib/libSystem.B.tbd: unknown architecture
+# This finds which developer directory / SDK on the image links correctly.
+
+on:
+  push:
+    branches: [probe/unix-isolation]
+    paths: [.github/workflows/probe-macos-toolchain.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15]
+    steps:
+    - name: What is installed
+      run: |
+        sw_vers
+        echo "--- xcode-select -p: $(xcode-select -p)"
+        echo "--- Xcode apps"; ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none)"
+        echo "--- CLT SDKs"; ls /Library/Developer/CommandLineTools/SDKs/ 2>/dev/null || echo "(none)"
+        echo "--- default ld"; ld -v 2>&1 | head -3
+        echo "--- default clang"; clang --version | head -2
+        echo "--- xcrun --show-sdk-path: $(xcrun --show-sdk-path)"
+        echo "--- head of libSystem.B.tbd in the default SDK"
+        head -6 "$(xcrun --show-sdk-path)/usr/lib/libSystem.B.tbd"
+
+    - name: Install GHC 9.10.2 (as test.yaml does)
+      run: |
+        ghcup install ghc 9.10.2 --set > /dev/null 2>&1 || ghcup install ghc 9.10.2 --set
+        ghc --version
+
+    - name: Try linking with each developer directory
+      run: |
+        printf 'int main(void){return 0;}\n' > hello.c
+        printf 'main :: IO ()\nmain = putStrLn "hi"\n' > Hello.hs
+        try() {  # $1 = label, rest = env assignments
+          label=$1; shift
+          echo "=== $label"
+          rm -f hello Hello Hello.o Hello.hi
+          if env "$@" clang hello.c -o hello > c.log 2>&1; then echo "  C link: ok"; else echo "  C link: FAIL"; head -5 c.log | sed 's/^/    /'; fi
+          if env "$@" ghc -v0 Hello.hs -o Hello > hs.log 2>&1 && ./Hello > /dev/null; then echo "  GHC link: ok"; else echo "  GHC link: FAIL"; head -5 hs.log | sed 's/^/    /'; fi
+        }
+        try "default ($(xcode-select -p))" X=1
+        for app in /Applications/Xcode*.app; do
+          [[ -d "$app" ]] || continue
+          try "DEVELOPER_DIR=$app" DEVELOPER_DIR="$app/Contents/Developer"
+        done
+        for sdk in /Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.sdk; do
+          [[ -d "$sdk" ]] || continue
+          try "SDKROOT=$sdk (CLT)" SDKROOT="$sdk"
+        done
