@@ -1,0 +1,274 @@
+name: Probe Unix isolation
+
+# Experiment, lives only on the fork's probe/unix-isolation branch.
+#
+# Takes the macOS and Linux artifacts that a test.yaml run on
+# fix/windows-runtime-dlls already built, deliberately breaks their
+# isolation, and checks that the new library audits in
+# check-artifact-lsp.py --startup-only catch it, while the old
+# check-artifact-runs.sh did not.
+
+on:
+  push:
+    branches: [probe/unix-isolation]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN: '39906982788'
+
+jobs:
+  probe:
+    name: Probe (${{ matrix.os }}, ${{ matrix.agda }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is left out: its builds fail on the runner's
+          # MacOSX27.0 SDK ("tapi error: malformed file"), so there is no
+          # arm64 artifact to probe.
+          - { os: ubuntu-latest,  agda: Agda-2.8.0,   suffix: ubuntu }
+          - { os: ubuntu-latest,  agda: Agda-2.6.4.3, suffix: ubuntu }
+          - { os: macos-15-intel, agda: Agda-2.8.0,   suffix: macos-x64 }
+          - { os: windows-latest, agda: Agda-2.8.0,   suffix: windows }
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Download artifact from the source run
+      uses: actions/download-artifact@v4
+      with:
+        name: als-${{ matrix.agda }}-${{ matrix.suffix }}
+        path: download
+        run-id: ${{ env.SOURCE_RUN }}
+        github-token: ${{ github.token }}
+
+    - name: Extract
+      shell: bash
+      run: |
+        mkdir -p release
+        python -m zipfile -e download/als-${{ matrix.agda }}-${{ matrix.suffix }}.zip release/
+        [[ "${{ runner.os }}" == "Windows" ]] || chmod +x release/als
+        ls -la release release/lib release/dylib 2>/dev/null || true
+
+    # ------------------------------------------------------------------
+    # Instrumentation: what does the real artifact link, and what does
+    # the runner have that could stand in for it?
+    # ------------------------------------------------------------------
+
+    - name: "Instrument (Linux): ICU linkage of the real artifact"
+      if: runner.os == 'Linux'
+      run: |
+        echo "--- NEEDED / RUNPATH of als"
+        readelf -d release/als | grep -E 'NEEDED|RUNPATH|RPATH'
+        for f in release/lib/*; do
+          echo "--- NEEDED / RUNPATH of $f"
+          readelf -d "$f" | grep -E 'NEEDED|RUNPATH|RPATH' || true
+        done
+        echo "--- LD_TRACE_LOADED_OBJECTS"
+        LD_TRACE_LOADED_OBJECTS=1 release/als
+        echo "--- system ICU on the runner"
+        ldconfig -p | grep -i icu || echo "(none)"
+
+    - name: "Instrument (macOS): ICU linkage of the real artifact"
+      if: runner.os == 'macOS'
+      run: |
+        echo "--- otool -L als"
+        otool -L release/als
+        for f in release/dylib/*; do
+          echo "--- otool -L $f"
+          otool -L "$f"
+        done
+        echo "--- ICU images dyld actually loads"
+        DYLD_PRINT_LIBRARIES=1 DYLD_FALLBACK_LIBRARY_PATH=/usr/lib release/als --version 2>&1 | grep -i icu || echo "(no ICU images)"
+        echo "--- Homebrew ICU on the runner"
+        brew list --versions | grep -i icu || echo "(none)"
+
+    # ------------------------------------------------------------------
+    # E0: the real artifact passes the new audit.
+    # ------------------------------------------------------------------
+
+    - name: "E0: real artifact passes the audit"
+      if: runner.os != 'Windows'
+      run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
+
+    # ------------------------------------------------------------------
+    # E1 (macOS): als loads Homebrew's libicuuc instead of the bundled one.
+    # Expected: old check passes (the gap), new audit fails naming Homebrew.
+    # ------------------------------------------------------------------
+
+    - name: "E1 (macOS): point als at Homebrew's libicuuc"
+      if: runner.os == 'macOS'
+      run: |
+        cp -R release leak
+        ref=$(otool -L leak/als | awk '/libicuuc/ {print $1}')
+        name=$(basename "$ref")                       # libicuuc.NN.dylib
+        major=$(echo "$name" | sed -E 's/libicuuc\.([0-9]+)\.dylib/\1/')
+        echo "als references $ref (ICU $major)"
+        prefix=$(brew --prefix "icu4c@$major" 2>/dev/null || true)
+        if [[ -z "$prefix" || ! -f "$prefix/lib/$name" ]]; then
+          brew install "icu4c@$major"
+          prefix=$(brew --prefix "icu4c@$major")
+        fi
+        target="$prefix/lib/$name"
+        ls -la "$target"
+        install_name_tool -change "$ref" "$target" leak/als
+        codesign -f -s - leak/als
+        otool -L leak/als | grep icu
+        echo "LEAK_TARGET=$target" >> "$GITHUB_ENV"
+
+    - name: "E1 (macOS): old check-artifact-runs.sh does not notice"
+      if: runner.os == 'macOS'
+      run: bash .github/scripts/check-artifact-runs.sh leak/als
+
+    - name: "E1 (macOS): new audit fails and names Homebrew"
+      if: runner.os == 'macOS'
+      run: |
+        set +e
+        python .github/scripts/check-artifact-lsp.py leak/als test/data/Unicode.agda --startup-only > e1.log 2>&1
+        status=$?
+        set -e
+        cat e1.log
+        [[ $status -ne 0 ]] || { echo "::error::audit passed a leaky artifact"; exit 1; }
+        grep -F "loaded from outside the archive and the OS: $LEAK_TARGET" e1.log
+
+    # ------------------------------------------------------------------
+    # E2 (Linux): als loses its RUNPATH, so all ICU comes from the system.
+    # Expected: new audit fails naming the system ICU.
+    # ------------------------------------------------------------------
+
+    - name: "E2 (Linux): drop als's RUNPATH"
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get install -y -qq patchelf > /dev/null
+        cp -R release leak
+        patchelf --remove-rpath leak/als
+        readelf -d leak/als | grep -E 'RUNPATH|RPATH' || echo "(no RUNPATH)"
+
+    - name: "E2 (Linux): old startup check (system ICU visible) does not notice"
+      if: runner.os == 'Linux'
+      run: bash .github/scripts/check-artifact-runs.sh leak/als
+
+    - name: "E2 (Linux): new audit fails and names the system ICU"
+      if: runner.os == 'Linux'
+      run: |
+        set +e
+        python .github/scripts/check-artifact-lsp.py leak/als test/data/Unicode.agda --startup-only > e2.log 2>&1
+        status=$?
+        set -e
+        cat e2.log
+        [[ $status -ne 0 ]] || { echo "::error::audit passed a leaky artifact"; exit 1; }
+        grep -E "not resolved from the archive: libicu.* => /(usr/)?lib" e2.log
+
+    # ------------------------------------------------------------------
+    # E3 (Linux): the subtle case. als keeps its RUNPATH but stops needing
+    # libicudata directly, so libicudata is found through libicuuc, which
+    # has no RUNPATH: the system copy wins although the bundled one is there.
+    # Expected: old check (system ICU visible) passes, new audit fails.
+    # ------------------------------------------------------------------
+
+    - name: "E3 (Linux): make libicudata a transitive-only dependency"
+      if: runner.os == 'Linux'
+      run: |
+        cp -R release transitive
+        data=$(readelf -d transitive/als | sed -nE 's/.*Shared library: \[(libicudata[^]]*)\].*/\1/p')
+        if [[ -z "$data" ]]; then
+          echo "als does not need libicudata directly; real artifact is already in the E3 shape"
+          echo "E3_SKIP=1" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        patchelf --remove-needed "$data" transitive/als
+        readelf -d transitive/als | grep -E 'NEEDED|RUNPATH'
+
+    - name: "E3 (Linux): old startup check (system ICU visible) does not notice"
+      if: runner.os == 'Linux' && env.E3_SKIP != '1'
+      run: bash .github/scripts/check-artifact-runs.sh transitive/als
+
+    - name: "E3 (Linux): new audit fails on libicudata"
+      if: runner.os == 'Linux' && env.E3_SKIP != '1'
+      run: |
+        set +e
+        python .github/scripts/check-artifact-lsp.py transitive/als test/data/Unicode.agda --startup-only > e3.log 2>&1
+        status=$?
+        set -e
+        cat e3.log
+        [[ $status -ne 0 ]] || { echo "::error::audit passed a leaky artifact"; exit 1; }
+        grep -E "not resolved from the archive: libicudata" e3.log
+
+    # ------------------------------------------------------------------
+    # Stand-in for verify-native-artifact, which the source run skips
+    # because its macos-latest builds fail.
+    # ------------------------------------------------------------------
+
+    - name: "Verify (Windows): startup on a system-only PATH"
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only
+
+    - name: "Verify (Windows): removing each runtime DLL fails startup"
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        $stash = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/als-runtime-control" -Force
+        foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+          $source = Join-Path 'release' $runtime
+          $hidden = Join-Path $stash.FullName $runtime
+          Move-Item $source $hidden -ErrorAction Stop
+          try {
+            python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only --expect-missing-library
+            if ($LASTEXITCODE -ne 0) { throw "removing $runtime did not fail startup with STATUS_DLL_NOT_FOUND" }
+          } finally {
+            Move-Item $hidden $source
+          }
+        }
+
+    - name: "Verify (Linux): startup with system ICU hidden"
+      if: ${{ !cancelled() && runner.os == 'Linux' }}
+      run: bash .github/scripts/check-artifact-runs.sh release/als --hide-icu
+
+    - name: "Verify (Linux): removing each bundled ICU library fails startup"
+      if: ${{ !cancelled() && runner.os == 'Linux' }}
+      run: |
+        stash="$RUNNER_TEMP/als-icu-control"
+        mkdir -p "$stash"
+        shopt -s nullglob
+        libs=(release/lib/libicu*)
+        [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/lib"; exit 1; }
+        for lib in "${libs[@]}"; do
+          name=$(basename "$lib")
+          mv "$lib" "$stash/$name"
+          failed_to_start=true
+          bash .github/scripts/check-artifact-runs.sh release/als --hide-icu --expect-failure || failed_to_start=false
+          mv "$stash/$name" "$lib"
+          $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
+        done
+
+    - name: "Verify (macOS): removing each bundled ICU library fails startup"
+      if: ${{ !cancelled() && runner.os == 'macOS' }}
+      run: |
+        stash="$RUNNER_TEMP/als-icu-control"
+        mkdir -p "$stash"
+        shopt -s nullglob
+        libs=(release/dylib/libicu*)
+        [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/dylib"; exit 1; }
+        for lib in "${libs[@]}"; do
+          name=$(basename "$lib")
+          mv "$lib" "$stash/$name"
+          failed_to_start=true
+          python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only --expect-missing-library || failed_to_start=false
+          mv "$stash/$name" "$lib"
+          $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
+        done
+
+    - name: "Verify: completed Cmd_load"
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: |
+        als="release/als"
+        [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
+        python .github/scripts/check-artifact-lsp.py "$als" test/data/Unicode.agda
