@@ -75,3 +75,29 @@ jobs:
           [[ -d "$sdk" ]] || continue
           try "SDKROOT=$sdk (CLT)" SDKROOT="$sdk"
         done
+
+    - name: Where does GHC get the CommandLineTools SDK path from?
+      if: ${{ !cancelled() }}
+      run: |
+        echo "--- package db fields mentioning an SDK"
+        for p in rts ffi base ghc-prim ghc-bignum; do
+          ghc-pkg describe --global "$p" 2>/dev/null | grep -iE 'sdk|CommandLineTools|library-dirs|extra-libraries|ld-options' | sed "s/^/$p: /" || true
+        done
+        echo "--- grep the whole GHC lib dir for CommandLineTools"
+        grep -rIl "CommandLineTools" "$(ghc --print-libdir)" 2>/dev/null | head || true
+        echo "--- the link command GHC runs"
+        rm -f Hello Hello.o Hello.hi
+        ghc -v3 Hello.hs -o Hello 2>&1 | grep -E 'Linking|"?gcc"?|clang|-L/|-isysroot|syslibroot' | grep -vE '^\*\*\*' | tail -5 || true
+
+    - name: "Fix A: point the CLT MacOSX.sdk symlink at the newest SDK this ld understands"
+      if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+      run: |
+        clt=/Library/Developer/CommandLineTools/SDKs
+        ls -la "$clt"
+        good=$(printf '%s\n' "$clt"/MacOSX26.*.sdk | sort -V | tail -1)
+        echo "repointing MacOSX.sdk -> $good"
+        sudo ln -sfn "$(basename "$good")" "$clt/MacOSX.sdk"
+        ls -la "$clt"
+        rm -f Hello Hello.o Hello.hi
+        if ghc -v0 Hello.hs -o Hello && ./Hello; then echo "FIX A: GHC link ok"; else echo "FIX A: GHC link FAIL"; fi
+
