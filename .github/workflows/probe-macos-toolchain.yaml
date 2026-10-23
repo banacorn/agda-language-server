@@ -37,9 +37,22 @@ jobs:
         head -6 "$(xcrun --show-sdk-path)/usr/lib/libSystem.B.tbd"
 
     - name: Install GHC 9.10.2 (as test.yaml does)
+      uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d # v2
+      with:
+        ghc-version: '9.10.2'
+        cabal-version: '3.12.1.0'
+
+    - name: Where GHC thinks the C toolchain is
       run: |
-        ghcup install ghc 9.10.2 --set > /dev/null 2>&1 || ghcup install ghc 9.10.2 --set
         ghc --version
+        ghc --info | grep -E 'C compiler|ld |Merge objects|ar command|LLVM' || true
+        settings="$(dirname "$(ghc --print-libdir)")/lib/settings"
+        [[ -f "$settings" ]] || settings="$(ghc --print-libdir)/settings"
+        echo "--- $settings"; grep -iE 'sysroot|sdk|clang|ld' "$settings" || true
+        echo "--- SDKROOT=${SDKROOT:-(unset)}  DEVELOPER_DIR=${DEVELOPER_DIR:-(unset)}"
+        echo "--- clang -v link of an empty program (which SDK and ld does it pick?)"
+        printf 'int main(void){return 0;}\n' > hello.c
+        clang -v hello.c -o hello 2>&1 | grep -E '"/.*ld"|isysroot|-syslibroot|SDKs' | head -5
 
     - name: Try linking with each developer directory
       run: |
@@ -53,6 +66,7 @@ jobs:
           if env "$@" ghc -v0 Hello.hs -o Hello > hs.log 2>&1 && ./Hello > /dev/null; then echo "  GHC link: ok"; else echo "  GHC link: FAIL"; head -5 hs.log | sed 's/^/    /'; fi
         }
         try "default ($(xcode-select -p))" X=1
+        try "SDKROOT=xcrun's SDK" SDKROOT="$(xcrun --show-sdk-path)"
         for app in /Applications/Xcode*.app; do
           [[ -d "$app" ]] || continue
           try "DEVELOPER_DIR=$app" DEVELOPER_DIR="$app/Contents/Developer"
