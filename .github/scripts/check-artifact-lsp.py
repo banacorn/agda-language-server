@@ -202,6 +202,18 @@ class Probe:
         for k in list(env.keys()):
             if k.lower() == "agda_datadir":
                 del env[k]
+        if sys.platform == "win32":
+            # Restrict only the server's environment. Python and CI tooling keep
+            # their PATH, while ALS cannot borrow MinGW runtimes from the runner.
+            import ctypes
+
+            ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+            for k in list(env.keys()):
+                if k.lower() == "path":
+                    del env[k]
+            windows = os.environ["SystemRoot"]
+            env["PATH"] = os.pathsep.join([os.path.join(windows, "System32"), windows])
+            log("server PATH: %s" % env["PATH"])
         agda_dir = tempfile.mkdtemp(prefix="als-artifact-probe-agda-dir-")
         env["AGDA_DIR"] = agda_dir
         return env
@@ -354,10 +366,28 @@ def main():
     parser.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT, help="timeout in seconds (default: %(default)s)"
     )
+    parser.add_argument("--startup-only", action="store_true", help="check --version instead of LSP")
     args = parser.parse_args()
 
     probe = Probe(args.als_path, args.fixture_path, args.timeout)
     try:
+        if args.startup_only:
+            probe.check_layout()
+            result = subprocess.run(
+                [probe.als_path, "--version"],
+                env=probe.build_env(),
+                cwd=tempfile.mkdtemp(prefix="als-artifact-startup-"),
+                capture_output=True,
+                text=True,
+                timeout=args.timeout,
+            )
+            log("startup exit: %s (0x%08X)" % (result.returncode, result.returncode & 0xFFFFFFFF))
+            log("stdout: %s" % result.stdout)
+            log("stderr: %s" % result.stderr)
+            if result.returncode != 0:
+                raise ProbeFailure("packaged executable failed to start")
+            log("PASS: packaged executable started")
+            return
         probe.run()
     except ProbeFailure as e:
         log("FAIL: %s" % e)

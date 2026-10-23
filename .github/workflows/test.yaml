@@ -14,7 +14,7 @@ env:
 
 on:
   push:
-    branches: [master]
+    branches: [master, fix/windows-runtime-packaging]
   pull_request:
     branches: [master]
 
@@ -625,8 +625,12 @@ jobs:
       if: runner.os == 'Linux'
       run: bash .github/scripts/check-artifact-runs.sh release/als --hide-icu
 
+    - name: 🧪 Check the packaged executable starts (Windows, system-only PATH)
+      if: runner.os == 'Windows'
+      run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only
+
     - name: 🧪 Check the packaged executable starts
-      if: runner.os != 'Linux'
+      if: runner.os == 'macOS'
       run: |
         als="release/als"
         [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
