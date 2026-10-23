@@ -14,7 +14,7 @@ env:
 
 on:
   push:
-    branches: [master, fix/windows-runtime-dlls]
+    branches: [master, fix/windows-runtime-dlls, probe/unix-isolation]
   pull_request:
     branches: [master]
 
