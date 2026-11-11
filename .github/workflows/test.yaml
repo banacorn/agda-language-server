@@ -17,6 +17,15 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      cache-only:
+        description: Build and refresh dependency caches without building release artifacts
+        type: boolean
+        default: true
+  schedule:
+    # Access shared caches before the default seven-day inactivity expiry.
+    - cron: '19 3 */3 * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
@@ -33,6 +42,7 @@ jobs:
   # copy staying in sync by hand.
   check-cabal-drift:
     name: Generate Cabal File & Build Sdist
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
     runs-on: ubuntu-latest
     steps:
     - name: 📥 Checkout repository
@@ -187,6 +197,13 @@ jobs:
     # runners (pre-provisioned by the runner image); actions/cache archives
     # the symlink itself, not its target, so Linux must cache the real path
     # directly. macOS and Windows have no such indirection.
+    # The runner image owns parts of this tree as root. Without taking
+    # ownership first, tar cannot restore directory modes/timestamps and
+    # actions/cache reports a miss after downloading the whole archive.
+    - name: Prepare Linux toolchain cache permissions
+      if: runner.os == 'Linux'
+      run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+
     - name: 💾 Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)
       id: haskell-toolchain
       uses: actions/cache/restore@v4
@@ -222,7 +239,8 @@ jobs:
     - name: 💾 Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)
       if: >
         matrix.agda == 'Agda-2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.ref == 'refs/heads/master' &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) &&
         steps.haskell-toolchain.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
@@ -330,7 +348,8 @@ jobs:
 
     - name: 💾 Save compiled-dependency cache
       if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.ref == 'refs/heads/master' &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) &&
         steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' &&
         steps.stack-snapshot.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
@@ -341,10 +360,11 @@ jobs:
         key: stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
 
     - name: 🏗️ Build ALS
+      if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       run: stack build $STACK_YAML_ARG
 
     - name: 📦 Bundle executable, DLLs and data files (on macOS)
-      if: runner.os == 'macOS'
+      if: (runner.os == 'macOS') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       run: |  # Bundle icu4c DLLs
 
         # see if icu4c has been installed
@@ -434,7 +454,7 @@ jobs:
         echo "    new path  : $icudata_path_new"
 
     - name: 📦 Bundle ICU libraries (on Linux)
-      if: runner.os == 'Linux'
+      if: (runner.os == 'Linux') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       run: |
         command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y patchelf
 
@@ -463,7 +483,7 @@ jobs:
         echo "rpath set on $executable: $(patchelf --print-rpath "$executable")"
 
     - name: 📦 Bundle executable, DLLs and data files (on Linux and macOS)
-      if: runner.os != 'Windows'
+      if: (runner.os != 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       id: zip
       run: |
         # locate the data-dir
@@ -493,7 +513,7 @@ jobs:
         
 
     - name: 📦 Bundle executable, DLLs and data files (on Windows)
-      if: runner.os == 'Windows'
+      if: (runner.os == 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       shell: pwsh
       run: |
         # locate the data-dir
@@ -528,9 +548,11 @@ jobs:
         mv zip/"$($env:ARTEFACT).zip" .
   
     - name: 🧪 Run tests
+      if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       run: stack test $STACK_YAML_ARG
 
     - name: 📤 Upload native artifact
+      if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.ARTEFACT }}
@@ -552,7 +574,7 @@ jobs:
     # then checks whichever artifact was built, and an entry whose build
     # failed fails at its own download. publish-* still require that
     # nothing failed.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only) }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -888,7 +910,8 @@ jobs:
     - name: Cache ghc-wasm-meta (Agda 2.8.0 is the sole writer)
       if: >
         matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.ref == 'refs/heads/master' &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) &&
         steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true' &&
         steps.validate-wasm-toolchain.outcome == 'success'
       uses: actions/cache/save@v4
@@ -973,7 +996,8 @@ jobs:
     - name: Cache native utilities (Agda 2.8.0 is the sole writer)
       if: >
         matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.ref == 'refs/heads/master' &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) &&
         steps.native-utils-cache-restore.outputs.cache-hit != 'true' &&
         steps.install-native-utils.outcome == 'success'
       uses: actions/cache/save@v4
@@ -1098,7 +1122,8 @@ jobs:
     - name: Cache dist-newstyle
       uses: actions/cache/save@v4
       if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.ref == 'refs/heads/master' &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) &&
         steps.build-deps-other-than-agda.outcome == 'success' &&
         steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit != 'true'
       with:
@@ -1107,7 +1132,8 @@ jobs:
 
     - name: Save cabal global store cache
       if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
+        github.ref == 'refs/heads/master' &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) &&
         steps.cabal-store-cache-restore.outputs.cache-hit != 'true' &&
         steps.build-deps-other-than-agda.outcome == 'success'
       uses: actions/cache/save@v4
@@ -1116,6 +1142,7 @@ jobs:
         key: ${{ env.CABAL_STORE_KEY }}
 
     - name: Build als
+      if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       working-directory: './als'
       run: |
         mkdir ~/out
@@ -1125,6 +1152,7 @@ jobs:
         echo "WASM_BINARY_NAME=${WASM_ASSET_BASENAME}.wasm" >> $GITHUB_ENV
 
     - name: 📤 Upload WASM artifact
+      if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.WASM_ASSET_BASENAME }}
