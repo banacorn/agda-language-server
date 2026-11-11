@@ -28,7 +28,7 @@ jobs:
   check-cabal-drift:
     name: Generate Cabal File & Build Sdist
     if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: "\U0001F4E5 Checkout repository"
         uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
     strategy:
       matrix:
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
         agda:
           - Agda-2.8.0
       fail-fast: false
@@ -98,7 +98,7 @@ jobs:
             PREFIX="als"
           fi
 
-          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
             ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
           fi
           if [[ ${{ matrix.os }} == "macos-15" ]]; then
@@ -434,7 +434,7 @@ jobs:
       matrix:
         os:
           - windows-latest
-          - ubuntu-latest
+          - ubuntu-24.04
           - macos-15
           - macos-15-intel
         agda:
@@ -464,7 +464,7 @@ jobs:
             PREFIX="als"
           fi
 
-          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
             ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
           fi
           if [[ ${{ matrix.os }} == "macos-15" ]]; then
@@ -900,7 +900,7 @@ jobs:
       - verify-native-artifact
       - build-wasm
     if: always() && !cancelled() && !contains(needs.*.result, 'failure') && github.ref == 'refs/heads/master' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     concurrency:
@@ -958,7 +958,7 @@ jobs:
       - build-wasm
     if: |
       always() && !cancelled() && !contains(needs.*.result, 'failure') && github.ref == 'refs/heads/master' && github.event_name == 'push' && github.repository == 'agda/agda-language-server'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     concurrency:

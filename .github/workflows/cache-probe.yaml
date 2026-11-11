@@ -17,14 +17,14 @@ jobs:
   native-producer:
     name: Native cold producer
     if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[wasm-only]') && !contains(github.event.head_commit.message, '[toolchain-only]')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       matrix:
         agda:
           - Agda-2.8.0
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
     steps:
       - name: "\U0001F4E5 Checkout repository"
         uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
             PREFIX="als"
           fi
 
-          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
             ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
           fi
           if [[ ${{ matrix.os }} == "macos-15" ]]; then
@@ -184,14 +184,14 @@ jobs:
     name: Native warm consumer and permission regression
     needs: native-producer
     if: always() && !cancelled() && (needs.native-producer.result == 'success' || github.event_name == 'pull_request')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       matrix:
         agda:
           - Agda-2.8.0
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
     steps:
       - name: "\U0001F4E5 Checkout repository"
         uses: actions/checkout@v4
@@ -214,7 +214,7 @@ jobs:
             PREFIX="als"
           fi
 
-          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
             ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
           fi
           if [[ ${{ matrix.os }} == "macos-15" ]]; then
@@ -792,14 +792,14 @@ jobs:
   native-toolchain-check:
     name: Immediate Linux permission regression
     if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[mode-only]')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       matrix:
         agda:
           - Agda-2.8.0
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
     steps:
       - name: "\U0001F4E5 Checkout repository"
         uses: actions/checkout@v4
@@ -822,7 +822,7 @@ jobs:
             PREFIX="als"
           fi
 
-          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
             ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
           fi
           if [[ ${{ matrix.os }} == "macos-15" ]]; then
