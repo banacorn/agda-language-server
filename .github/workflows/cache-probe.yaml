@@ -1,3 +1,4 @@
+# PR scope probe: consume caches from the base branch without saving.
 name: Cache verification playground
 on:
   push:
