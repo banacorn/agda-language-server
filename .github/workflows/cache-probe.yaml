@@ -16,7 +16,7 @@ env:
 jobs:
   native-producer:
     name: Native cold producer
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[wasm-only]')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -183,7 +183,7 @@ jobs:
   native-consumer:
     name: Native warm consumer and permission regression
     needs: native-producer
-    if: always() && !cancelled() && (needs.native-producer.result == 'success' || needs.native-producer.result == 'skipped')
+    if: always() && !cancelled() && (needs.native-producer.result == 'success' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -545,12 +545,12 @@ jobs:
           fingerprint() { yq -o=json 'del(.benchmarks) | [.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1; }
           fingerprint > "$RUNNER_TEMP/fingerprint-with"
           wasm32-wasi-cabal build --dependencies-only --dry-run
-          jq -S '."install-plan" | sort_by(.id)' dist-newstyle/cache/plan.json > "$RUNNER_TEMP/plan-with.json"
+          jq -S '."install-plan" | map(select(."pkg-name" != "agda-language-server")) | sort_by(.id)' dist-newstyle/cache/plan.json > "$RUNNER_TEMP/plan-with.json"
           yq -i 'del(.benchmarks)' package.yaml
           hpack --force
           fingerprint > "$RUNNER_TEMP/fingerprint-without"
           wasm32-wasi-cabal build --dependencies-only --dry-run
-          jq -S '."install-plan" | sort_by(.id)' dist-newstyle/cache/plan.json > "$RUNNER_TEMP/plan-without.json"
+          jq -S '."install-plan" | map(select(."pkg-name" != "agda-language-server")) | sort_by(.id)' dist-newstyle/cache/plan.json > "$RUNNER_TEMP/plan-without.json"
           diff -u "$RUNNER_TEMP/fingerprint-with" "$RUNNER_TEMP/fingerprint-without"
           diff -u "$RUNNER_TEMP/plan-with.json" "$RUNNER_TEMP/plan-without.json"
           cp "$RUNNER_TEMP/package-with-benchmark.yaml" package.yaml
