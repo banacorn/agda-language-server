@@ -1,1140 +1,904 @@
-# modified from https://github.com/simonmichael/hledger/blob/master/.github/workflows/linux.yml
-
 name: CI
-
 defaults:
   run:
     shell: bash
-
 env:
-  # Pinned exact Stack version: installed and verified on every platform,
-  # and baked into the toolchain and compiled-dependency cache keys below.
-  # Never 'latest'.
-  STACK_VERSION: '3.3.1'
-
+  STACK_VERSION: 3.3.1
 on:
   push:
-    branches: [master]
+    branches:
+      - master
   pull_request:
-    branches: [master]
-
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      cache-only:
+        description: Build and refresh dependency caches without building release artifacts
+        type: boolean
+        default: true
+  schedule:
+    - cron: 19 3 */3 * *
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
-
 jobs:
-  # package.yaml is the source of truth for this Stack project.
-  # agda-language-server.cabal is a generated file, never committed (see
-  # .gitignore) -- every job that builds anything regenerates it itself
-  # with hpack, right after checkout, rather than relying on a checked-in
-  # copy staying in sync by hand.
   check-cabal-drift:
     name: Generate Cabal File & Build Sdist
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
     runs-on: ubuntu-latest
     steps:
-    - name: 📥 Checkout repository
-      uses: actions/checkout@v4
-
-    - name: 📥 Install hpack
-      run: |
-        mkdir -p "$HOME/.local/bin"
-        curl -fsSL https://github.com/sol/hpack/releases/download/0.38.3/hpack_linux.gz \
-          | gunzip > "$HOME/.local/bin/hpack"
-        chmod +x "$HOME/.local/bin/hpack"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-    - name: 🔄 Generate cabal file with hpack
-      run: hpack
-
-    - name: 🏗 Setup Haskell
-      uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d # v2
-      with:
-        ghc-version: '9.10.2'
-        cabal-version: '3.12.1.0'
-        enable-stack: true
-        stack-version: ${{ env.STACK_VERSION }}
-
-    - name: 🔒 Check stack-*.yaml.lock drift (fails if Stack would rewrite it)
-      run: |
-        for f in stack-9.10.2-Agda-2.8.0.yaml stack-9.10.2-Agda-2.7.0.1.yaml stack-9.10.2-Agda-2.6.4.3.yaml; do
-          echo "::group::${f}.lock"
-          stack build --stack-yaml "$f" --dry-run --lock-file error-on-write
-          echo "::endgroup::"
-        done
-
-    - name: 📦 Build source distribution
-      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
-      run: cabal sdist
-
-    - name: 📤 Upload Hackage sdist
-      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
-      uses: actions/upload-artifact@v4
-      with:
-        name: hackage-sdist
-        path: dist-newstyle/sdist/*.tar.gz
-        if-no-files-found: error
-        retention-days: 7
-
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+      - name: "\U0001F4E5 Install hpack"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/sol/hpack/releases/download/0.38.3/hpack_linux.gz \
+            | gunzip > "$HOME/.local/bin/hpack"
+          chmod +x "$HOME/.local/bin/hpack"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: "\U0001F504 Generate cabal file with hpack"
+        run: hpack
+      - name: "\U0001F3D7 Setup Haskell"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: 9.10.2
+          cabal-version: 3.12.1.0
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F512 Check stack-*.yaml.lock drift (fails if Stack would rewrite it)"
+        run: |
+          for f in stack-9.10.2-Agda-2.8.0.yaml stack-9.10.2-Agda-2.7.0.1.yaml stack-9.10.2-Agda-2.6.4.3.yaml; do
+            echo "::group::${f}.lock"
+            stack build --stack-yaml "$f" --dry-run --lock-file error-on-write
+            echo "::endgroup::"
+          done
+      - name: "\U0001F4E6 Build source distribution"
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: cabal sdist
+      - name: "\U0001F4E4 Upload Hackage sdist"
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hackage-sdist
+          path: dist-newstyle/sdist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
   build-and-test:
     name: Build and Test
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # arm64 macOS builds on macos-15, not macos-latest: on macos-latest
-        # (macOS 26) GHC 9.10.2's rts links against the Command Line Tools'
-        # MacOSX.sdk, which there is SDK 27, whose .tbd stubs no installed
-        # ld can read ("unknown architecture arm64e.x1"). macos-15 also keeps
-        # the release's minimum macOS where it was.
-        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
-        agda: ['Agda-2.8.0', 'Agda-2.7.0.1', 'Agda-2.6.4.3']
-        # macos-15-intel (Intel Mac) runners are scarce and can sit queued
-        # for 13+ minutes before starting, dominating PR feedback latency
-        # for a job that then only takes ~3 minutes to actually run. Cut
-        # PR runs down to one Agda version on that runner; push/tag events
-        # (master, releases) still get the full 3-way matrix. The 'os'
-        # value collapses to '' when not a pull_request, which matches no
-        # real matrix entry, so nothing is excluded outside pull_request.
-        exclude:
-          - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
-            agda: 'Agda-2.7.0.1'
-          - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
-            agda: 'Agda-2.6.4.3'
+        os:
+          - ubuntu-latest
+        agda:
+          - Agda-2.8.0
       fail-fast: false
     steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+      - name: "\U0001F4E4 Install yq (Windows)"
+        if: runner.os == 'Windows'
+        uses: frenck/action-setup-yq@v1
+        with:
+          version: v4.53.6
+      - name: "\U0001F39B️ Determine which version of Agda to target"
+        run: |
+          STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)
+          STACK_YAML_ARG="--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)"
 
-    - name: 📥 Checkout repository
-      uses: actions/checkout@v4
+          # Determine artifact naming based on branch/tag
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
 
-    - name: 📤 Install yq (Windows)
-      if: runner.os == 'Windows'
-      uses: frenck/action-setup-yq@v1
-      with:
-        # Unpinned 'latest' (the default) triggers an unauthenticated
-        # curl to api.github.com to resolve the newest release, which
-        # is vulnerable to shared-runner-IP anonymous rate limits.
-        version: v4.53.6
+          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
 
-    - name: 🎛️ Determine which version of Agda to target
-      run: |
-        STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)
-        STACK_YAML_ARG="--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)"
-
-        # Determine artifact naming based on branch/tag
-        if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
-          PREFIX="als-dev"
-        elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-          PREFIX="als-${{ github.ref_name }}"
-        else
-          PREFIX="als"
-        fi
-
-        if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
-        fi
-        if [[ ${{ matrix.os }} == "macos-15" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
-        fi
-        if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
-        fi
-        if [[ ${{ matrix.os }} == "windows-latest" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
-        fi
-        
-        echo STACK_YAML_ARG="${STACK_YAML_ARG}" >> "${GITHUB_ENV}"
-        echo STACK_YAML="${STACK_YAML}"         >> "${GITHUB_ENV}"
-        echo ARTEFACT="${ARTEFACT}"             >> "${GITHUB_ENV}"
-
-    - name: 🎛️ Determine Stack resolver & GHC version
-      run: |
-        STACK_RESOLVER=$(yq .resolver $STACK_YAML)
-        GHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)
-        echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
-        echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
-
-    # Redesigned cache boundaries:
-    #  - The toolchain cache holds only the ghcup install directory
-    #    (~/.ghcup on Linux/macOS, C:\ghcup on Windows), keyed by the
-    #    pinned STACK_VERSION and GHC_VERSION (no Agda target -- shared
-    #    across the three Agda entries for this OS/architecture). It is
-    #    restored before Haskell setup so a hit lets setup skip
-    #    downloading GHC and Stack, verified against the pinned versions
-    #    afterward, and saved by the Agda 2.8.0 entry immediately after
-    #    that verification -- independently of the snapshot/dependency
-    #    builds below, so a setup or version-mismatch failure blocks the
-    #    save but a later dependency-build failure cannot suppress it.
-    #    Only the Agda 2.8.0 entry is allowed to save it, so the three
-    #    parallel jobs for one OS/architecture never race to write the
-    #    same key. haskell-actions/setup is pinned to a full commit SHA
-    #    (not the mutable v2 tag) so its installer behavior can't
-    #    silently change what a hit key was actually verified against.
-    #  - The compiled-dependency cache holds only
-    #    $STACK_ROOT/{snapshots,setup-exe-cache}, is Agda-specific (so
-    #    each Agda entry owns its own key), and is keyed by every
-    #    dimension that changes its compatibility (OS, arch, Stack, GHC,
-    #    ICU ABI, resolver, Agda target) plus CONFIG_HASH, so that a
-    #    prefix hit (only CONFIG_HASH differs) is only ever used when
-    #    every other dimension is identical, and any other dimension
-    #    changing yields a complete miss (the restore-keys prefix itself
-    #    changes, so a differently-configured entry cannot match it).
-    #  - No .stack-work caching: removed outright pending a future
-    #    measurement showing a net wall-clock benefit.
-
-    # ~/.ghcup is a symlink to /usr/local/.ghcup on GitHub-hosted Ubuntu
-    # runners (pre-provisioned by the runner image); actions/cache archives
-    # the symlink itself, not its target, so Linux must cache the real path
-    # directly. macOS and Windows have no such indirection.
-    - name: 💾 Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)
-      id: haskell-toolchain
-      uses: actions/cache/restore@v4
-      with:
-        path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
-        key: ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
-
-    - name: 🏗 Setup Haskell (pinned Stack version, all platforms)
-      uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d # v2
-      with:
-        ghc-version: ${{ env.GHC_VERSION }}
-        enable-stack: true
-        stack-version: ${{ env.STACK_VERSION }}
-
-    - name: 🔍 Verify pinned Stack version
-      run: |
-        actual="$(stack --numeric-version)"
-        echo "Stack version: ${actual}"
-        if [[ "${actual}" != "${STACK_VERSION}" ]]; then
-          echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
-          exit 1
-        fi
-
-    - name: 🔍 Verify pinned GHC version
-      run: |
-        actual="$(ghc --numeric-version)"
-        echo "GHC version: ${actual}"
-        if [[ "${actual}" != "${GHC_VERSION}" ]]; then
-          echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
-          exit 1
-        fi
-
-    - name: 💾 Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)
-      if: >
-        matrix.agda == 'Agda-2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
-        steps.haskell-toolchain.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
-        key: ${{ steps.haskell-toolchain.outputs.cache-primary-key }}
-
-    - name: 🎛️ Determine Stack root
-      run: |
-        STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
-        echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
-
-    - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
-      if: runner.os == 'macOS'
-      run: |
-        echo PKG_CONFIG_PATH="$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "${GITHUB_ENV}"
-
-    - name: 📥 Install the icu library (on Windows)
-      if: runner.os == 'Windows'
-      run: |
-        # -Sy refreshes the package database first: the GH Windows runner
-        # image ships a bundled MSYS2 db snapshot that can reference
-        # package versions mirrors have since pruned, causing "failed
-        # retrieving file ... 404" across every configured mirror despite
-        # the requested packages being entirely unversioned here.
-        #
-        # mingw64, not clang64: with system-ghc: true, Cabal's configure
-        # step (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs
-        # pointing at Stack's bundled msys2/mingw64 tree regardless of
-        # which MSYS2 subsystem we install into, so the packages actually
-        # used by the linker must live under mingw64, not clang64.
-        stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
-        stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
-
-    - name: 🛣️ Add MSYS2 mingw64 bin to PATH (on Windows)
-      if: runner.os == 'Windows'
-      run: |
-        stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
-
-    - name: 🎛️ Resolve ICU version
-      env:
-        RUNNER_OS: ${{ runner.os }}
-      run: bash .github/scripts/resolve-icu-version.sh
-
-    # Includes the workflow file itself so a change to the dependency-build
-    # commands/flags (not just the project files below) also busts the
-    # cache, instead of silently reusing a build produced by different
-    # commands. Coarser than hashing just the relevant steps, but needs no
-    # separate script to keep in sync.
-    #
-    # DEPS_FINGERPRINT: only package.yaml's dependency-affecting content --
-    # every 'dependencies:' list, wherever nested under flag/arch 'when:'
-    # conditions -- extracted structurally via yq rather than hashing the
-    # whole file, so the package's own version or an unrelated ghc-options
-    # change (e.g. dropping -with-rtsopts) doesn't bust this cache. Mirrors
-    # the identical fix applied to the WASM dist-newstyle cache key.
-    # agda-language-server.cabal is intentionally not hashed: it is never
-    # committed (see .gitignore), and Stack regenerates it itself from
-    # package.yaml via its bundled hpack before every build, so hashing
-    # package.yaml already captures anything that would end up in it.
-    - name: 🎛️ Compute compiled-dependency CONFIG_HASH
-      run: |
-        DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
-        echo CONFIG_HASH="${{ hashFiles(env.STACK_YAML, format('{0}.lock', env.STACK_YAML), '.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}" >> "${GITHUB_ENV}"
-
-    - name: 🔍 Review all variables
-      run: |
-        echo "STACK_YAML      = ${STACK_YAML}"
-        echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
-        echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
-        echo "ARTEFACT        = ${ARTEFACT}"
-        echo "GHC_VERSION     = ${GHC_VERSION}"
-        echo "STACK_VERSION   = ${STACK_VERSION}"
-        echo "ICU_VERSION     = ${ICU_VERSION}"
-        echo "STACK_ROOT      = ${STACK_ROOT}"
-        echo "CONFIG_HASH     = ${CONFIG_HASH}"
-
-    - name: 💾 Restore compiled-dependency cache
-      id: stack-snapshot
-      uses: actions/cache/restore@v4
-      with:
-        path: |
-          ${{ env.STACK_ROOT }}/snapshots
-          ${{ env.STACK_ROOT }}/setup-exe-cache
-        key: stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
-        restore-keys: |
-          stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
-
-    - name: 📸 Build Snapshot
-      run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
-
-    - name: 🏗️ Build Dependencies
-      id: build-deps
-      run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
-
-    - name: 🏗️ Build Testings
-      id: build-test-deps
-      run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
-
-    # Cache save point: both dependency-producing steps above must have
-    # succeeded, and only the designated writer(s) may save a key shared
-    # by more than one matrix entry. A later ALS build or test failure
-    # must not invalidate an already-saved compiled-dependency cache.
-    # (The macOS toolchain cache is saved earlier, right after Haskell
-    # setup and version verification -- see above.)
-
-    - name: 💾 Save compiled-dependency cache
-      if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
-        steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' &&
-        steps.stack-snapshot.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: |
-          ${{ env.STACK_ROOT }}/snapshots
-          ${{ env.STACK_ROOT }}/setup-exe-cache
-        key: stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
-
-    - name: 🏗️ Build ALS
-      run: stack build $STACK_YAML_ARG
-
-    - name: 📦 Bundle executable, DLLs and data files (on macOS)
-      if: runner.os == 'macOS'
-      run: |  # Bundle icu4c DLLs
-
-        # see if icu4c has been installed
-        if [ "$(brew list | grep icu4c)" = "" ]
-            then
-                echo "installing icu4c"
-                brew install icu4c
-        fi
-
-        # get the directory of the DDLs we want (icuuc, icui18n, icudata)
-        dylib_dir=$(dirname "$(brew list icu4c | grep icuuc.dylib)")
-        echo "dylib_dir: $dylib_dir"
-
-        # find the path of "als"
-        executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)"/bin -name "als")
-        echo "executable: $executable"
-
-        # remove the old dylib, and make a new one
-        rm -rf dylib
-        mkdir dylib
-
-        ################################################################################
-        # icuuc
-        ################################################################################
-
-        icuuc_id=$(otool -L "$executable" | grep icuuc | awk '{print $1}')
-        icuuc_id_basename=$(basename "$icuuc_id")
-
-        icuuc_path=$dylib_dir/$icuuc_id_basename
-        icuuc_path_new=dylib/$icuuc_id_basename
-        icuuc_id_new=@loader_path/dylib/$icuuc_id_basename
-
-        # copy icuuc to the new directory
-        cp "$icuuc_path" "$icuuc_path_new"
-
-        # change icuuc's ID referenced by ALS
-        install_name_tool -change "$icuuc_id" "$icuuc_id_new" "$executable"
-
-        echo "icuuc referenced by ALS"
-        echo "    old ID  : $icuuc_id"
-        echo "    new ID  : $icuuc_id_new"
-        echo "    old path: $icuuc_path"
-        echo "    new path: $icuuc_path_new"
-
-        ################################################################################
-        # icui18n
-        ################################################################################
-
-        icui18n_id=$(otool -L "$executable" | grep icui18n | awk '{print $1}')
-        icui18n_id_basename=$(basename "$icui18n_id")
-
-        icui18n_path=$dylib_dir/$icui18n_id_basename
-        icui18n_path_new=dylib/$icui18n_id_basename
-        icui18n_id_new=@loader_path/dylib/$icui18n_id_basename
-
-        # copy icui18n to the new directory
-        cp "$icui18n_path" "$icui18n_path_new"
-
-        # change icui18n's ID referenced by ALS
-        install_name_tool -change "$icui18n_id" "$icui18n_id_new" "$executable"
-
-        echo "icui18n referenced by ALS"
-        echo "    old ID  : $icui18n_id"
-        echo "    new ID  : $icui18n_id_new"
-        echo "    old path: $icui18n_path"
-        echo "    new path: $icui18n_path_new"
-
-        ################################################################################
-        # icudata
-        ################################################################################
-
-        # otool -L "$icui18n_id" | grep icudata | awk '{print $1}'
-        icudata_id=$(otool -L "$icuuc_path" | grep icudata | awk '{print $1}')
-        icudata_id_basename=$(basename "$icudata_id")
-
-        icudata_path=$dylib_dir/$icudata_id_basename
-        icudata_path_new=dylib/$icudata_id_basename
-
-        # copy icudata to the new directory
-        cp "$icudata_path" "$icudata_path_new"
-
-        # no need of changing the ID because supposely it's already of "@loader_path"
-
-        echo "icudata referenced by icuuc"
-        echo "    old ID    : $icudata_id"
-        echo "    old path  : $icudata_path"
-        echo "    new path  : $icudata_path_new"
-
-    - name: 📦 Bundle ICU libraries (on Linux)
-      if: runner.os == 'Linux'
-      run: |
-        command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y patchelf
-
-        executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
-        echo "executable: $executable"
-
-        rm -rf lib
-        mkdir lib
-
-        for name in libicuuc libicui18n libicudata; do
-          entry=$(ldd "$executable" | grep "${name}\.so" || true)
-          if [[ -z "$entry" ]]; then
-            echo "::error::could not find $name in ldd output for $executable"
+          echo STACK_YAML_ARG="${STACK_YAML_ARG}" >> "${GITHUB_ENV}"
+          echo STACK_YAML="${STACK_YAML}"         >> "${GITHUB_ENV}"
+          echo ARTEFACT="${ARTEFACT}"             >> "${GITHUB_ENV}"
+      - name: "\U0001F39B️ Determine Stack resolver & GHC version"
+        run: |
+          STACK_RESOLVER=$(yq .resolver $STACK_YAML)
+          GHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)
+          echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
+          echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
+      - name: Prepare Linux toolchain cache permissions
+        if: runner.os == 'Linux'
+        run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+      - name: "\U0001F4BE Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)"
+        id: haskell-toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: probe-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+      - name: "\U0001F3D7 Setup Haskell (pinned Stack version, all platforms)"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F50D Verify pinned Stack version"
+        run: |
+          actual="$(stack --numeric-version)"
+          echo "Stack version: ${actual}"
+          if [[ "${actual}" != "${STACK_VERSION}" ]]; then
+            echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
             exit 1
           fi
-          soname=$(echo "$entry" | awk '{print $1}')
-          real_path=$(readlink -f "$(echo "$entry" | awk '{print $3}')")
-          cp "$real_path" "lib/$soname"
-          echo "bundled $soname (from $real_path)"
-        done
+      - name: "\U0001F50D Verify pinned GHC version"
+        run: |
+          actual="$(ghc --numeric-version)"
+          echo "GHC version: ${actual}"
+          if [[ "${actual}" != "${GHC_VERSION}" ]]; then
+            echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F4BE Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)"
+        if: |
+          matrix.agda == 'Agda-2.8.0' && github.ref == 'refs/heads/probe/cache-verification' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.haskell-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: ${{ steps.haskell-toolchain.outputs.cache-primary-key }}
+      - name: "\U0001F39B️ Determine Stack root"
+        run: |
+          STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
+          echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
+      - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo PKG_CONFIG_PATH="$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "${GITHUB_ENV}"
+      - name: "\U0001F4E5 Install the icu library (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          # -Sy refreshes the package database first: the GH Windows runner
+          # image ships a bundled MSYS2 db snapshot that can reference
+          # package versions mirrors have since pruned, causing "failed
+          # retrieving file ... 404" across every configured mirror despite
+          # the requested packages being entirely unversioned here.
+          #
+          # mingw64, not clang64: with system-ghc: true, Cabal's configure
+          # step (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs
+          # pointing at Stack's bundled msys2/mingw64 tree regardless of
+          # which MSYS2 subsystem we install into, so the packages actually
+          # used by the linker must live under mingw64, not clang64.
+          stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
+          stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
+      - name: "\U0001F6E3️ Add MSYS2 mingw64 bin to PATH (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
+      - name: "\U0001F39B️ Resolve ICU version"
+        env:
+          RUNNER_OS: ${{ runner.os }}
+        run: bash .github/scripts/resolve-icu-version.sh
+      - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
+        run: |
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
+          echo CONFIG_HASH="${{ hashFiles(env.STACK_YAML, format('{0}.lock', env.STACK_YAML), '.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}" >> "${GITHUB_ENV}"
+      - name: "\U0001F50D Review all variables"
+        run: |
+          echo "STACK_YAML      = ${STACK_YAML}"
+          echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
+          echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
+          echo "ARTEFACT        = ${ARTEFACT}"
+          echo "GHC_VERSION     = ${GHC_VERSION}"
+          echo "STACK_VERSION   = ${STACK_VERSION}"
+          echo "ICU_VERSION     = ${ICU_VERSION}"
+          echo "STACK_ROOT      = ${STACK_ROOT}"
+          echo "CONFIG_HASH     = ${CONFIG_HASH}"
+      - name: "\U0001F4BE Restore compiled-dependency cache"
+        id: stack-snapshot
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: probe-stack-snapshot-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+          restore-keys: |
+            probe-stack-snapshot-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
+      - name: "\U0001F4F8 Build Snapshot"
+        run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
+      - name: "\U0001F3D7️ Build Dependencies"
+        id: build-deps
+        run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
+      - name: "\U0001F3D7️ Build Testings"
+        id: build-test-deps
+        run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
+      - name: "\U0001F4BE Save compiled-dependency cache"
+        if: |
+          github.ref == 'refs/heads/probe/cache-verification' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: probe-stack-snapshot-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+      - name: "\U0001F3D7️ Build ALS"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: stack build $STACK_YAML_ARG
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on macOS)"
+        if: (runner.os == 'macOS') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: |
 
-        # $ORIGIN is a dynamic-linker token (the directory containing
-        # the executable at run time), not a shell variable -- must
-        # stay unexpanded here.
-        patchelf --set-rpath '$ORIGIN/lib' "$executable"
-        echo "rpath set on $executable: $(patchelf --print-rpath "$executable")"
+          # see if icu4c has been installed
+          if [ "$(brew list | grep icu4c)" = "" ]
+              then
+                  echo "installing icu4c"
+                  brew install icu4c
+          fi
 
-    - name: 📦 Bundle executable, DLLs and data files (on Linux and macOS)
-      if: runner.os != 'Windows'
-      id: zip
-      run: |
-        # locate the data-dir
-        datadir=$(find "$(stack path $STACK_YAML_ARG --snapshot-install-root)/share" -type d -name "Agda-*")
-        echo "datadir: $datadir"
+          # get the directory of the DDLs we want (icuuc, icui18n, icudata)
+          dylib_dir=$(dirname "$(brew list icu4c | grep icuuc.dylib)")
+          echo "dylib_dir: $dylib_dir"
 
-        # locate the executable
-        executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
-        echo "executable: $executable"
+          # find the path of "als"
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)"/bin -name "als")
+          echo "executable: $executable"
 
-        # make a temporary directory for compresssing
-        mkdir zip
-        cp -r "$datadir" zip/data
-        if [[ ${{ runner.os }} == "macOS" ]]; then
-            cp -r dylib zip/dylib
-        fi
-        if [[ ${{ runner.os }} == "Linux" ]]; then
-            cp -r lib zip/lib
-        fi
-        cp "$executable" zip/
+          # remove the old dylib, and make a new one
+          rm -rf dylib
+          mkdir dylib
 
-        # compress
-        cd zip
-        zip -r $ARTEFACT.zip ./*
-        cd ..
-        mv zip/$ARTEFACT.zip .
-        
+          ################################################################################
+          # icuuc
+          ################################################################################
 
-    - name: 📦 Bundle executable, DLLs and data files (on Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        # locate the data-dir
-        $snapshot = (stack path $STACK_YAML_ARG --snapshot-install-root)
-        $datadir = (ls $snapshot\share *Agda-* -Recurse -Directory).FullName
+          icuuc_id=$(otool -L "$executable" | grep icuuc | awk '{print $1}')
+          icuuc_id_basename=$(basename "$icuuc_id")
 
-        # locate the executable
-        $local = (stack path $STACK_YAML_ARG --local-install-root)
-        $executable = (ls $local\bin *als.exe* -Recurse -File).FullName
+          icuuc_path=$dylib_dir/$icuuc_id_basename
+          icuuc_path_new=dylib/$icuuc_id_basename
+          icuuc_id_new=@loader_path/dylib/$icuuc_id_basename
 
-        # make a temporary directory for compresssing
-        mkdir zip
-        cp -r $datadir zip/data
-        cp $executable zip/
+          # copy icuuc to the new directory
+          cp "$icuuc_path" "$icuuc_path_new"
 
-        # include text-icu DLLs
-        $mingw64bin = (stack path $STACK_YAML_ARG --extra-library-dirs).split(", ") -match "\\bin"
-        cp (ls $mingw64bin *libicudt*) zip/
-        cp (ls $mingw64bin *libicuin*) zip/
-        cp (ls $mingw64bin *libicuuc*) zip/
-        # ICU imports these MinGW runtimes. Take them from ICU's own
-        # directory, so the bundled copies match the ICU they serve.
-        foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
-          cp (Join-Path $mingw64bin $runtime) zip/ -ErrorAction Stop
-        }
-        ls zip
+          # change icuuc's ID referenced by ALS
+          install_name_tool -change "$icuuc_id" "$icuuc_id_new" "$executable"
 
-        # compress
-        cd zip
-        Compress-Archive * "$($env:ARTEFACT).zip"
-        cd ..
-        mv zip/"$($env:ARTEFACT).zip" .
-  
-    - name: 🧪 Run tests
-      run: stack test $STACK_YAML_ARG
+          echo "icuuc referenced by ALS"
+          echo "    old ID  : $icuuc_id"
+          echo "    new ID  : $icuuc_id_new"
+          echo "    old path: $icuuc_path"
+          echo "    new path: $icuuc_path_new"
 
-    - name: 📤 Upload native artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.ARTEFACT }}
-        path: ${{ env.ARTEFACT }}.zip
-        if-no-files-found: error
-        retention-days: 7
+          ################################################################################
+          # icui18n
+          ################################################################################
 
-  # Consumes a native ZIP produced by build-and-test above, on a runner
-  # with no Haskell/Stack setup and no Haskell cache restore, so a pass
-  # here can't be explained by a leftover Stack snapshot or compiled-in
-  # builder path -- only by the packaged executable finding its own
-  # bundled Agda data directory (#30). Source-level unit/integration
-  # tests stay on build-and-test; only packaged-artifact acceptance
-  # checks live here.
+          icui18n_id=$(otool -L "$executable" | grep icui18n | awk '{print $1}')
+          icui18n_id_basename=$(basename "$icui18n_id")
+
+          icui18n_path=$dylib_dir/$icui18n_id_basename
+          icui18n_path_new=dylib/$icui18n_id_basename
+          icui18n_id_new=@loader_path/dylib/$icui18n_id_basename
+
+          # copy icui18n to the new directory
+          cp "$icui18n_path" "$icui18n_path_new"
+
+          # change icui18n's ID referenced by ALS
+          install_name_tool -change "$icui18n_id" "$icui18n_id_new" "$executable"
+
+          echo "icui18n referenced by ALS"
+          echo "    old ID  : $icui18n_id"
+          echo "    new ID  : $icui18n_id_new"
+          echo "    old path: $icui18n_path"
+          echo "    new path: $icui18n_path_new"
+
+          ################################################################################
+          # icudata
+          ################################################################################
+
+          # otool -L "$icui18n_id" | grep icudata | awk '{print $1}'
+          icudata_id=$(otool -L "$icuuc_path" | grep icudata | awk '{print $1}')
+          icudata_id_basename=$(basename "$icudata_id")
+
+          icudata_path=$dylib_dir/$icudata_id_basename
+          icudata_path_new=dylib/$icudata_id_basename
+
+          # copy icudata to the new directory
+          cp "$icudata_path" "$icudata_path_new"
+
+          # no need of changing the ID because supposely it's already of "@loader_path"
+
+          echo "icudata referenced by icuuc"
+          echo "    old ID    : $icudata_id"
+          echo "    old path  : $icudata_path"
+          echo "    new path  : $icudata_path_new"
+      - name: "\U0001F4E6 Bundle ICU libraries (on Linux)"
+        if: (runner.os == 'Linux') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: |
+          command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y patchelf
+
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
+          echo "executable: $executable"
+
+          rm -rf lib
+          mkdir lib
+
+          for name in libicuuc libicui18n libicudata; do
+            entry=$(ldd "$executable" | grep "${name}\.so" || true)
+            if [[ -z "$entry" ]]; then
+              echo "::error::could not find $name in ldd output for $executable"
+              exit 1
+            fi
+            soname=$(echo "$entry" | awk '{print $1}')
+            real_path=$(readlink -f "$(echo "$entry" | awk '{print $3}')")
+            cp "$real_path" "lib/$soname"
+            echo "bundled $soname (from $real_path)"
+          done
+
+          # $ORIGIN is a dynamic-linker token (the directory containing
+          # the executable at run time), not a shell variable -- must
+          # stay unexpanded here.
+          patchelf --set-rpath '$ORIGIN/lib' "$executable"
+          echo "rpath set on $executable: $(patchelf --print-rpath "$executable")"
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Linux and macOS)"
+        if: (runner.os != 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        id: zip
+        run: |
+          # locate the data-dir
+          datadir=$(find "$(stack path $STACK_YAML_ARG --snapshot-install-root)/share" -type d -name "Agda-*")
+          echo "datadir: $datadir"
+
+          # locate the executable
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
+          echo "executable: $executable"
+
+          # make a temporary directory for compresssing
+          mkdir zip
+          cp -r "$datadir" zip/data
+          if [[ ${{ runner.os }} == "macOS" ]]; then
+              cp -r dylib zip/dylib
+          fi
+          if [[ ${{ runner.os }} == "Linux" ]]; then
+              cp -r lib zip/lib
+          fi
+          cp "$executable" zip/
+
+          # compress
+          cd zip
+          zip -r $ARTEFACT.zip ./*
+          cd ..
+          mv zip/$ARTEFACT.zip .
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Windows)"
+        if: (runner.os == 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        shell: pwsh
+        run: |
+          # locate the data-dir
+          $snapshot = (stack path $STACK_YAML_ARG --snapshot-install-root)
+          $datadir = (ls $snapshot\share *Agda-* -Recurse -Directory).FullName
+
+          # locate the executable
+          $local = (stack path $STACK_YAML_ARG --local-install-root)
+          $executable = (ls $local\bin *als.exe* -Recurse -File).FullName
+
+          # make a temporary directory for compresssing
+          mkdir zip
+          cp -r $datadir zip/data
+          cp $executable zip/
+
+          # include text-icu DLLs
+          $mingw64bin = (stack path $STACK_YAML_ARG --extra-library-dirs).split(", ") -match "\\bin"
+          cp (ls $mingw64bin *libicudt*) zip/
+          cp (ls $mingw64bin *libicuin*) zip/
+          cp (ls $mingw64bin *libicuuc*) zip/
+          # ICU imports these MinGW runtimes. Take them from ICU's own
+          # directory, so the bundled copies match the ICU they serve.
+          foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            cp (Join-Path $mingw64bin $runtime) zip/ -ErrorAction Stop
+          }
+          ls zip
+
+          # compress
+          cd zip
+          Compress-Archive * "$($env:ARTEFACT).zip"
+          cd ..
+          mv zip/"$($env:ARTEFACT).zip" .
+      - name: "\U0001F9EA Run tests"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: stack test $STACK_YAML_ARG
+      - name: "\U0001F4E4 Upload native artifact"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTEFACT }}
+          path: ${{ env.ARTEFACT }}.zip
+          if-no-files-found: error
+          retention-days: 7
   verify-native-artifact:
     name: Verify Native Artifact
     needs: build-and-test
-    # Run even when some build-and-test entries failed: each entry here
-    # then checks whichever artifact was built, and an entry whose build
-    # failed fails at its own download. publish-* still require that
-    # nothing failed.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only) }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
-        agda: ['Agda-2.8.0', 'Agda-2.7.0.1', 'Agda-2.6.4.3']
-        # Must mirror build-and-test's matrix and PR exclusions, and the
-        # artifact-name computation below must mirror its "Determine
-        # which version of Agda to target" step, exactly -- otherwise
-        # this job downloads the wrong artifact or misses one entirely.
-        # Keep both in sync by hand; there is no single source of truth
-        # to derive them from.
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-15
+          - macos-15-intel
+        agda:
+          - Agda-2.8.0
+          - Agda-2.7.0.1
+          - Agda-2.6.4.3
         exclude:
           - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
-            agda: 'Agda-2.7.0.1'
+            agda: Agda-2.7.0.1
           - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
-            agda: 'Agda-2.6.4.3'
+            agda: Agda-2.6.4.3
       fail-fast: false
     steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+      - name: "\U0001F40D Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "\U0001F39B️ Determine expected artifact name"
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
 
-    - name: 📥 Checkout repository
-      uses: actions/checkout@v4
+          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
 
-    - name: 🐍 Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
+          echo ARTEFACT="${ARTEFACT}" >> "${GITHUB_ENV}"
+      - name: "\U0001F4E5 Download native artifact"
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTEFACT }}
+          path: download
+      - name: "\U0001F4E6 Extract release archive"
+        run: |
+          mkdir -p release
+          python -m zipfile -e "download/${ARTEFACT}.zip" release/
 
-    - name: 🎛️ Determine expected artifact name
-      run: |
-        if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
-          PREFIX="als-dev"
-        elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-          PREFIX="als-${{ github.ref_name }}"
-        else
-          PREFIX="als"
-        fi
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            # zipfile doesn't preserve the Unix executable bit.
+            chmod +x release/als
+          fi
+      - name: "\U0001F50D Verify archive layout"
+        run: |
+          als="release/als"
+          [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
 
-        if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
-        fi
-        if [[ ${{ matrix.os }} == "macos-15" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
-        fi
-        if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
-        fi
-        if [[ ${{ matrix.os }} == "windows-latest" ]]; then
-          ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
-        fi
+          [[ -f "$als" ]] || { echo "::error::missing $als in extracted archive"; exit 1; }
+          [[ -d "release/data/lib" ]] || { echo "::error::missing release/data/lib in extracted archive"; exit 1; }
 
-        echo ARTEFACT="${ARTEFACT}" >> "${GITHUB_ENV}"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            [[ -d "release/dylib" ]] || { echo "::error::missing release/dylib in extracted archive"; exit 1; }
+          fi
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            [[ -d "release/lib" ]] || { echo "::error::missing release/lib in extracted archive"; exit 1; }
+          fi
+      - name: "\U0001F9EA Check the packaged executable starts (Linux, hidden system ICU)"
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/check-artifact-runs.sh release/als --hide-icu
+      - name: "\U0001F9EA Check the packaged executable resolves ICU from the archive (Linux, system ICU visible)"
+        if: runner.os == 'Linux'
+        run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
+      - name: "\U0001F9EA Check the packaged executable starts (macOS, libraries from the archive or the OS only)"
+        if: runner.os == 'macOS'
+        run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
+      - name: "\U0001F9EA Check removing each bundled ICU library fails startup (Linux, hidden system ICU)"
+        if: runner.os == 'Linux'
+        run: |
+          # Shows the startup checks above would catch any one of these
+          # libraries going missing from the archive.
+          stash="$RUNNER_TEMP/als-icu-control"
+          mkdir -p "$stash"
+          shopt -s nullglob
+          libs=(release/lib/libicu*)
+          [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/lib"; exit 1; }
+          for lib in "${libs[@]}"; do
+            name=$(basename "$lib")
+            mv "$lib" "$stash/$name"
+            failed_to_start=true
+            bash .github/scripts/check-artifact-runs.sh release/als --hide-icu --expect-failure || failed_to_start=false
+            mv "$stash/$name" "$lib"
+            $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
+          done
+      - name: "\U0001F9EA Check removing each bundled ICU library fails startup (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          # Shows the startup check above would catch any one of these
+          # libraries going missing from the archive.
+          stash="$RUNNER_TEMP/als-icu-control"
+          mkdir -p "$stash"
+          shopt -s nullglob
+          libs=(release/dylib/libicu*)
+          [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/dylib"; exit 1; }
+          for lib in "${libs[@]}"; do
+            name=$(basename "$lib")
+            mv "$lib" "$stash/$name"
+            failed_to_start=true
+            python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only --expect-missing-library || failed_to_start=false
+            mv "$stash/$name" "$lib"
+            $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
+          done
+      - name: "\U0001F9EA Check the startup audit catches a dylib loaded from Homebrew (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          cp -R release leak-homebrew
+          ref=$(otool -L leak-homebrew/als | awk '/libicuuc/ {print $1}')
+          name=$(basename "$ref")
+          major=$(echo "$name" | sed -E 's/libicuuc\.([0-9]+)\.dylib/\1/')
+          target="$(brew --prefix "icu4c@$major")/lib/$name"
+          [[ -f "$target" ]] || brew install "icu4c@$major"
+          install_name_tool -change "$ref" "$target" leak-homebrew/als
+          codesign -f -s - leak-homebrew/als
+          # dyld reports the resolved file under Cellar, not the opt/ symlink.
+          leaked=$(python -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$target")
+          echo "LEAKED_DYLIB=$leaked" >> "$GITHUB_ENV"
 
-    - name: 📥 Download native artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ env.ARTEFACT }}
-        path: download
+          if python .github/scripts/check-artifact-lsp.py leak-homebrew/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als that loads $leaked"; exit 1
+          fi
+          cat audit.log
+          grep -F "loaded from outside the archive and the OS: $leaked" audit.log
+      - name: "\U0001F9EA Check the completed-load audit catches a dylib loaded from Homebrew (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          # Same Homebrew-leak copy as above, through a full LSP load.
+          if python .github/scripts/check-artifact-lsp.py leak-homebrew/als test/data/Unicode.agda > audit.log 2>&1; then
+            cat audit.log; echo "::error::the completed-load audit passed an als that loads $LEAKED_DYLIB"; exit 1
+          fi
+          cat audit.log
+          grep -F "loaded from outside the archive and the OS: $LEAKED_DYLIB" audit.log
+      - name: "\U0001F9EA Check the startup audit catches ICU resolved from the system (Linux)"
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -qq patchelf > /dev/null
 
-    - name: 📦 Extract release archive
-      run: |
-        mkdir -p release
-        python -m zipfile -e "download/${ARTEFACT}.zip" release/
+          # 1. als loses its RUNPATH, so all of ICU resolves from the system.
+          cp -R release leak-no-runpath
+          patchelf --remove-rpath leak-no-runpath/als
+          if python .github/scripts/check-artifact-lsp.py leak-no-runpath/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als without RUNPATH"; exit 1
+          fi
+          cat audit.log
+          grep -E "not resolved from the archive: libicuuc[^ ]* => /" audit.log
 
-        if [[ "${{ runner.os }}" != "Windows" ]]; then
-          # zipfile doesn't preserve the Unix executable bit.
-          chmod +x release/als
-        fi
-
-    - name: 🔍 Verify archive layout
-      run: |
-        als="release/als"
-        [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
-
-        [[ -f "$als" ]] || { echo "::error::missing $als in extracted archive"; exit 1; }
-        [[ -d "release/data/lib" ]] || { echo "::error::missing release/data/lib in extracted archive"; exit 1; }
-
-        if [[ "${{ runner.os }}" == "macOS" ]]; then
-          [[ -d "release/dylib" ]] || { echo "::error::missing release/dylib in extracted archive"; exit 1; }
-        fi
-        if [[ "${{ runner.os }}" == "Linux" ]]; then
-          [[ -d "release/lib" ]] || { echo "::error::missing release/lib in extracted archive"; exit 1; }
-        fi
-
-    - name: 🧪 Check the packaged executable starts (Linux, hidden system ICU)
-      if: runner.os == 'Linux'
-      run: bash .github/scripts/check-artifact-runs.sh release/als --hide-icu
-
-    - name: 🧪 Check the packaged executable resolves ICU from the archive (Linux, system ICU visible)
-      if: runner.os == 'Linux'
-      run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
-
-    - name: 🧪 Check the packaged executable starts (macOS, libraries from the archive or the OS only)
-      if: runner.os == 'macOS'
-      run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
-
-    - name: 🧪 Check removing each bundled ICU library fails startup (Linux, hidden system ICU)
-      if: runner.os == 'Linux'
-      run: |
-        # Shows the startup checks above would catch any one of these
-        # libraries going missing from the archive.
-        stash="$RUNNER_TEMP/als-icu-control"
-        mkdir -p "$stash"
-        shopt -s nullglob
-        libs=(release/lib/libicu*)
-        [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/lib"; exit 1; }
-        for lib in "${libs[@]}"; do
-          name=$(basename "$lib")
-          mv "$lib" "$stash/$name"
-          failed_to_start=true
-          bash .github/scripts/check-artifact-runs.sh release/als --hide-icu --expect-failure || failed_to_start=false
-          mv "$stash/$name" "$lib"
-          $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
-        done
-
-    - name: 🧪 Check removing each bundled ICU library fails startup (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        # Shows the startup check above would catch any one of these
-        # libraries going missing from the archive.
-        stash="$RUNNER_TEMP/als-icu-control"
-        mkdir -p "$stash"
-        shopt -s nullglob
-        libs=(release/dylib/libicu*)
-        [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/dylib"; exit 1; }
-        for lib in "${libs[@]}"; do
-          name=$(basename "$lib")
-          mv "$lib" "$stash/$name"
-          failed_to_start=true
-          python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only --expect-missing-library || failed_to_start=false
-          mv "$stash/$name" "$lib"
-          $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
-        done
-
-    # The audits above pass on a correct archive. These steps break a copy
-    # of the archive on purpose, the way a packaging regression would, and
-    # require the audit to fail and name the library that leaked in.
-
-    - name: 🧪 Check the startup audit catches a dylib loaded from Homebrew (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        cp -R release leak-homebrew
-        ref=$(otool -L leak-homebrew/als | awk '/libicuuc/ {print $1}')
-        name=$(basename "$ref")
-        major=$(echo "$name" | sed -E 's/libicuuc\.([0-9]+)\.dylib/\1/')
-        target="$(brew --prefix "icu4c@$major")/lib/$name"
-        [[ -f "$target" ]] || brew install "icu4c@$major"
-        install_name_tool -change "$ref" "$target" leak-homebrew/als
-        codesign -f -s - leak-homebrew/als
-        # dyld reports the resolved file under Cellar, not the opt/ symlink.
-        leaked=$(python -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$target")
-        echo "LEAKED_DYLIB=$leaked" >> "$GITHUB_ENV"
-
-        if python .github/scripts/check-artifact-lsp.py leak-homebrew/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
-          cat audit.log; echo "::error::the audit passed an als that loads $leaked"; exit 1
-        fi
-        cat audit.log
-        grep -F "loaded from outside the archive and the OS: $leaked" audit.log
-
-    - name: 🧪 Check the completed-load audit catches a dylib loaded from Homebrew (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        # Same Homebrew-leak copy as above, through a full LSP load.
-        if python .github/scripts/check-artifact-lsp.py leak-homebrew/als test/data/Unicode.agda > audit.log 2>&1; then
-          cat audit.log; echo "::error::the completed-load audit passed an als that loads $LEAKED_DYLIB"; exit 1
-        fi
-        cat audit.log
-        grep -F "loaded from outside the archive and the OS: $LEAKED_DYLIB" audit.log
-
-    - name: 🧪 Check the startup audit catches ICU resolved from the system (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get install -y -qq patchelf > /dev/null
-
-        # 1. als loses its RUNPATH, so all of ICU resolves from the system.
-        cp -R release leak-no-runpath
-        patchelf --remove-rpath leak-no-runpath/als
-        if python .github/scripts/check-artifact-lsp.py leak-no-runpath/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
-          cat audit.log; echo "::error::the audit passed an als without RUNPATH"; exit 1
-        fi
-        cat audit.log
-        grep -E "not resolved from the archive: libicuuc[^ ]* => /" audit.log
-
-        # 2. als keeps its RUNPATH but stops needing libicudata directly, so
-        #    libicudata is found through libicuuc, which has no RUNPATH of its
-        #    own: the system copy wins although the bundled one is there.
-        data=$(readelf -d release/als | sed -nE 's/.*Shared library: \[(libicudata[^]]*)\].*/\1/p')
-        [[ -n "$data" ]] || { echo "::error::als does not need libicudata directly"; exit 1; }
-        cp -R release leak-transitive
-        patchelf --remove-needed "$data" leak-transitive/als
-        if python .github/scripts/check-artifact-lsp.py leak-transitive/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
-          cat audit.log; echo "::error::the audit passed an als that finds $data through libicuuc"; exit 1
-        fi
-        cat audit.log
-        grep -F "not resolved from the archive: $data => /" audit.log
-
-    - name: 🧪 Check the startup audit catches a non-ICU library from outside the OS (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        # als finds a copy of libgmp in a directory that is neither the
-        # archive nor the system's, through an extra RUNPATH entry.
-        gmp=$(LD_TRACE_LOADED_OBJECTS=1 release/als | awk '$1 ~ /^libgmp\.so/ {print $1, $3}')
-        [[ -n "$gmp" ]] || { echo "::error::als does not need libgmp"; exit 1; }
-        read -r gmp_name gmp_path <<< "$gmp"
-        stray="$RUNNER_TEMP/stray-libs"
-        mkdir -p "$stray"
-        cp "$gmp_path" "$stray/$gmp_name"
-        cp -R release leak-stray-dir
-        patchelf --set-rpath "\$ORIGIN/lib:$stray" leak-stray-dir/als
-        if python .github/scripts/check-artifact-lsp.py leak-stray-dir/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
-          cat audit.log; echo "::error::the audit passed an als that loads $stray/$gmp_name"; exit 1
-        fi
-        cat audit.log
-        grep -F "not resolved from the archive: $gmp_name => $stray/$gmp_name" audit.log
-
-    - name: 🧪 Check the packaged executable starts (Windows, system-only PATH)
-      if: runner.os == 'Windows'
-      run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only
-
-    - name: 🧪 Check removing each bundled runtime DLL fails startup (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        # Shows the startup check above would catch any one of these
-        # runtimes going missing from the archive again.
-        $stash = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/als-runtime-control" -Force
-        foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
-          $source = Join-Path 'release' $runtime
-          $hidden = Join-Path $stash.FullName $runtime
-          Move-Item $source $hidden -ErrorAction Stop
-          try {
-            python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only --expect-missing-library
-            if ($LASTEXITCODE -ne 0) { throw "removing $runtime did not fail startup with STATUS_DLL_NOT_FOUND" }
-          } finally {
-            Move-Item $hidden $source
+          # 2. als keeps its RUNPATH but stops needing libicudata directly, so
+          #    libicudata is found through libicuuc, which has no RUNPATH of its
+          #    own: the system copy wins although the bundled one is there.
+          data=$(readelf -d release/als | sed -nE 's/.*Shared library: \[(libicudata[^]]*)\].*/\1/p')
+          [[ -n "$data" ]] || { echo "::error::als does not need libicudata directly"; exit 1; }
+          cp -R release leak-transitive
+          patchelf --remove-needed "$data" leak-transitive/als
+          if python .github/scripts/check-artifact-lsp.py leak-transitive/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als that finds $data through libicuuc"; exit 1
+          fi
+          cat audit.log
+          grep -F "not resolved from the archive: $data => /" audit.log
+      - name: "\U0001F9EA Check the startup audit catches a non-ICU library from outside the OS (Linux)"
+        if: runner.os == 'Linux'
+        run: |
+          # als finds a copy of libgmp in a directory that is neither the
+          # archive nor the system's, through an extra RUNPATH entry.
+          gmp=$(LD_TRACE_LOADED_OBJECTS=1 release/als | awk '$1 ~ /^libgmp\.so/ {print $1, $3}')
+          [[ -n "$gmp" ]] || { echo "::error::als does not need libgmp"; exit 1; }
+          read -r gmp_name gmp_path <<< "$gmp"
+          stray="$RUNNER_TEMP/stray-libs"
+          mkdir -p "$stray"
+          cp "$gmp_path" "$stray/$gmp_name"
+          cp -R release leak-stray-dir
+          patchelf --set-rpath "\$ORIGIN/lib:$stray" leak-stray-dir/als
+          if python .github/scripts/check-artifact-lsp.py leak-stray-dir/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als that loads $stray/$gmp_name"; exit 1
+          fi
+          cat audit.log
+          grep -F "not resolved from the archive: $gmp_name => $stray/$gmp_name" audit.log
+      - name: "\U0001F9EA Check the packaged executable starts (Windows, system-only PATH)"
+        if: runner.os == 'Windows'
+        run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only
+      - name: "\U0001F9EA Check removing each bundled runtime DLL fails startup (Windows)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Shows the startup check above would catch any one of these
+          # runtimes going missing from the archive again.
+          $stash = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/als-runtime-control" -Force
+          foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            $source = Join-Path 'release' $runtime
+            $hidden = Join-Path $stash.FullName $runtime
+            Move-Item $source $hidden -ErrorAction Stop
+            try {
+              python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only --expect-missing-library
+              if ($LASTEXITCODE -ne 0) { throw "removing $runtime did not fail startup with STATUS_DLL_NOT_FOUND" }
+            } finally {
+              Move-Item $hidden $source
+            }
           }
-        }
-
-    - name: 🧪 Check a completed Cmd_load on the packaged executable
-      run: |
-        als="release/als"
-        [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
-        python .github/scripts/check-artifact-lsp.py "$als" test/data/Unicode.agda
-
+      - name: "\U0001F9EA Check a completed Cmd_load on the packaged executable"
+        run: |
+          als="release/als"
+          [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
+          python .github/scripts/check-artifact-lsp.py "$als" test/data/Unicode.agda
   build-wasm:
     name: Build WASM
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         agda:
-        - { name: '2.8.0', label: 'Agda-2.8.0', flag: '2-8-0', commit: 'e2f8c69414fa115328280ecc4de1d2b7a23be7fa' }
-        - { name: '2.7.0.1', label: 'Agda-2.7.0.1', flag: '2-7-0', commit: '702c924fdab93aa8992adca84e72a91c490f7b1b' }
-        - { name: '2.6.4.3', label: 'Agda-2.6.4.3', flag: '2-6-4', commit: '8f35851954c39dc3849095bfd018bed9bd1b32ad' }
+          - name: 2.8.0
+            label: Agda-2.8.0
+            flag: 2-8-0
+            commit: e2f8c69414fa115328280ecc4de1d2b7a23be7fa
+          - name: 2.7.0.1
+            label: Agda-2.7.0.1
+            flag: 2-7-0
+            commit: 702c924fdab93aa8992adca84e72a91c490f7b1b
+          - name: 2.6.4.3
+            label: Agda-2.6.4.3
+            flag: 2-6-4
+            commit: 8f35851954c39dc3849095bfd018bed9bd1b32ad
       fail-fast: false
-    
     env:
-      GHC_WASM_META_FLAVOUR: '9.10'
-      GHC_WASM_META_COMMIT_HASH: 'c3f44696d29aaeadd755d69c51735954bfcd59db'
-      ALEX_VERSION: '3.5.0.0'
-      HAPPY_VERSION: '1.20.1.1'
-
+      GHC_WASM_META_FLAVOUR: "9.10"
+      GHC_WASM_META_COMMIT_HASH: c3f44696d29aaeadd755d69c51735954bfcd59db
+      ALEX_VERSION: 3.5.0.0
+      HAPPY_VERSION: 1.20.1.1
     steps:
-    - uses: actions/checkout@v4
-      with:
-        path: als
-        submodules: true
+      - uses: actions/checkout@v4
+        with:
+          path: als
+          submodules: true
+      - name: "\U0001F4E5 Install hpack"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/sol/hpack/releases/download/0.38.3/hpack_linux.gz \
+            | gunzip > "$HOME/.local/bin/hpack"
+          chmod +x "$HOME/.local/bin/hpack"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: "\U0001F504 Generate cabal file with hpack"
+        working-directory: als
+        run: hpack
+      - name: Compute cache key
+        run: |
+          echo "CI_CACHE_KEY=${{ runner.os }}-${{ runner.arch }}-${{ env.GHC_WASM_META_COMMIT_HASH }}-flavor-${{ env.GHC_WASM_META_FLAVOUR }}" >> "$GITHUB_ENV"
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+          echo "WASM_ASSET_BASENAME=${PREFIX}-${{ matrix.agda.label }}-wasm" >> "$GITHUB_ENV"
+      - name: Compute WASM toolchain cache key
+        run: |
+          HASH=$(printf '%s' "v1-${GHC_WASM_META_COMMIT_HASH}-${GHC_WASM_META_FLAVOUR}" | sha256sum | cut -d' ' -f1)
+          echo "WASM_TOOLCHAIN_KEY=ghc-wasm-v3-${{ runner.os }}-${{ runner.arch }}-${HASH}" >> "$GITHUB_ENV"
+      - name: Restore ghc-wasm-meta toolchain cache
+        id: ghc-wasm-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ghc-wasm
+          key: ${{ env.WASM_TOOLCHAIN_KEY }}
+      - name: Clone and setup ghc-wasm-meta
+        id: ghc-wasm-setup
+        if: steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true'
+        run: |
+          mkdir ghc-wasm-meta
+          cd ghc-wasm-meta
+          git config --global init.defaultBranch dontcare
+          git config --global advice.detachedHead false
+          git init
+          git remote add origin https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta.git
+          git fetch origin ${{ env.GHC_WASM_META_COMMIT_HASH }} --depth=1
+          git checkout FETCH_HEAD
+          FLAVOUR=${{ env.GHC_WASM_META_FLAVOUR }} ./setup.sh
+      - name: Add ghc-wasm-meta to PATH
+        run: ~/.ghc-wasm/add_to_github_path.sh
+      - name: Validate ghc-wasm-meta toolchain executables
+        if: steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true'
+        id: validate-wasm-toolchain
+        run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-wasm-toolchain.sh"
+      - name: Cache ghc-wasm-meta (Agda 2.8.0 is the sole writer)
+        if: |
+          matrix.agda.name == '2.8.0' && github.ref == 'refs/heads/probe/cache-verification' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true' && steps.validate-wasm-toolchain.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ghc-wasm
+          key: ${{ env.WASM_TOOLCHAIN_KEY }}
+      - name: Update wasm32 cabal
+        run: wasm32-wasi-cabal update
+      - name: Compute native-utilities cache key
+        run: |
+          GHC_BIN="$(command -v ghc)"
+          GHC_VERSION="$(ghc --numeric-version)"
+          CABAL_VERSION="$(~/.ghc-wasm/cabal/bin/cabal --numeric-version)"
+          echo "HOST_GHC_BIN=${GHC_BIN}" >> "$GITHUB_ENV"
+          HASH=$(printf '%s' "v2-${GHC_VERSION}-${CABAL_VERSION}-${ALEX_VERSION}-${HAPPY_VERSION}" | sha256sum | cut -d' ' -f1)
+          echo "NATIVE_UTILS_KEY=native-tools-v7-${{ runner.os }}-${{ runner.arch }}-${HASH}" >> "$GITHUB_ENV"
+      - name: Restore native-utilities cache
+        id: native-utils-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.native-utils
+          key: ${{ env.NATIVE_UTILS_KEY }}
+      - name: Set native-utilities datadir env vars
+        run: |
+          echo "alex_datadir=$HOME/.native-utils/share/alex-${ALEX_VERSION}" >> "$GITHUB_ENV"
+          echo "happy_datadir=$HOME/.native-utils/share/happy-${HAPPY_VERSION}" >> "$GITHUB_ENV"
+      - name: Add native-utilities dir to PATH (exact hit)
+        if: steps.native-utils-cache-restore.outputs.cache-hit == 'true'
+        run: echo "$HOME/.native-utils" >> "$GITHUB_PATH"
+      - name: Validate restored native utilities (exact hit)
+        if: steps.native-utils-cache-restore.outputs.cache-hit == 'true'
+        run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-native-utils.sh"
+      - name: Install native utilities (exact miss)
+        if: steps.native-utils-cache-restore.outputs.cache-hit != 'true'
+        id: install-native-utils
+        run: |
+          echo ">>> Update cabal"
+          ~/.ghc-wasm/cabal/bin/cabal update
+          echo ">>> Install alex and happy"
+          mkdir -p ~/.native-utils
+          ~/.ghc-wasm/cabal/bin/cabal install \
+            --with-compiler="$HOST_GHC_BIN" \
+            --installdir="$HOME/.native-utils" --install-method=copy --overwrite-policy=always \
+            "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
+          echo "$HOME/.native-utils" >> "$GITHUB_PATH"
 
-    # package.yaml is the source of truth; agda-language-server.cabal is
-    # generated and never committed (see .gitignore). Plain cabal, unlike
-    # Stack, has no built-in hpack integration, so this job regenerates it
-    # itself before any 'cabal build' below can read it.
-    - name: 📥 Install hpack
-      run: |
-        mkdir -p "$HOME/.local/bin"
-        curl -fsSL https://github.com/sol/hpack/releases/download/0.38.3/hpack_linux.gz \
-          | gunzip > "$HOME/.local/bin/hpack"
-        chmod +x "$HOME/.local/bin/hpack"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-    - name: 🔄 Generate cabal file with hpack
-      working-directory: als
-      run: hpack
-
-    - name: Compute cache key
-      run: |
-        echo "CI_CACHE_KEY=${{ runner.os }}-${{ runner.arch }}-${{ env.GHC_WASM_META_COMMIT_HASH }}-flavor-${{ env.GHC_WASM_META_FLAVOUR }}" >> "$GITHUB_ENV"
-        if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
-          PREFIX="als-dev"
-        elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-          PREFIX="als-${{ github.ref_name }}"
-        else
-          PREFIX="als"
-        fi
-        echo "WASM_ASSET_BASENAME=${PREFIX}-${{ matrix.agda.label }}-wasm" >> "$GITHUB_ENV"
-
-    # Redesigned WASM caching: see wasm.yaml, which this mirrors, for the
-    # full rationale. Both are Agda-2.8.0-writes, exact-match-only caches
-    # saved immediately after their own producer succeeds.
-
-    - name: Compute WASM toolchain cache key
-      run: |
-        HASH=$(printf '%s' "v1-${GHC_WASM_META_COMMIT_HASH}-${GHC_WASM_META_FLAVOUR}" | sha256sum | cut -d' ' -f1)
-        echo "WASM_TOOLCHAIN_KEY=ghc-wasm-v3-${{ runner.os }}-${{ runner.arch }}-${HASH}" >> "$GITHUB_ENV"
-
-    - name: Restore ghc-wasm-meta toolchain cache
-      id: ghc-wasm-cache-restore
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.ghc-wasm
-        key: ${{ env.WASM_TOOLCHAIN_KEY }}
-
-    - name: Clone and setup ghc-wasm-meta
-      id: ghc-wasm-setup
-      if: steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true'
-      run: |
-        mkdir ghc-wasm-meta
-        cd ghc-wasm-meta
-        git config --global init.defaultBranch dontcare
-        git config --global advice.detachedHead false
-        git init
-        git remote add origin https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta.git
-        git fetch origin ${{ env.GHC_WASM_META_COMMIT_HASH }} --depth=1
-        git checkout FETCH_HEAD
-        FLAVOUR=${{ env.GHC_WASM_META_FLAVOUR }} ./setup.sh
-
-    - name: Add ghc-wasm-meta to PATH
-      run: ~/.ghc-wasm/add_to_github_path.sh
-
-    - name: Validate ghc-wasm-meta toolchain executables
-      if: steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true'
-      id: validate-wasm-toolchain
-      run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-wasm-toolchain.sh"
-
-    - name: Cache ghc-wasm-meta (Agda 2.8.0 is the sole writer)
-      if: >
-        matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
-        steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true' &&
-        steps.validate-wasm-toolchain.outcome == 'success'
-      uses: actions/cache/save@v4
-      with:
-        path: ~/.ghc-wasm
-        key: ${{ env.WASM_TOOLCHAIN_KEY }}
-
-    - name: Update wasm32 cabal
-      run: wasm32-wasi-cabal update
-
-    # Producer identity: the key previously hashed only Cabal's version,
-    # never GHC's, despite GHC being what actually compiles alex/happy.
-    # GHC's resolved path is exported so the install step below can select
-    # it explicitly via --with-compiler, guaranteeing the version hashed
-    # here is the compiler actually used.
-    - name: Compute native-utilities cache key
-      run: |
-        GHC_BIN="$(command -v ghc)"
-        GHC_VERSION="$(ghc --numeric-version)"
-        CABAL_VERSION="$(~/.ghc-wasm/cabal/bin/cabal --numeric-version)"
-        echo "HOST_GHC_BIN=${GHC_BIN}" >> "$GITHUB_ENV"
-        HASH=$(printf '%s' "v2-${GHC_VERSION}-${CABAL_VERSION}-${ALEX_VERSION}-${HAPPY_VERSION}" | sha256sum | cut -d' ' -f1)
-        echo "NATIVE_UTILS_KEY=native-tools-v7-${{ runner.os }}-${{ runner.arch }}-${HASH}" >> "$GITHUB_ENV"
-
-    - name: Restore native-utilities cache
-      id: native-utils-cache-restore
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.native-utils
-        key: ${{ env.NATIVE_UTILS_KEY }}
-
-    # alex/happy embed an absolute --datadir path at build time (read via
-    # Paths_alex/Paths_happy, which check the alex_datadir/happy_datadir
-    # env vars before falling back to that baked-in path). `cabal install
-    # --install-method=copy` only relocates the executable, not the data
-    # directory it depends on at runtime, so a binary restored from cache
-    # on a fresh runner points at a Cabal store entry that was never
-    # installed there. Pointing these env vars at a copy of the data
-    # directory that lives inside the cached payload itself makes the
-    # payload actually self-contained, on both the cache-hit and
-    # cache-miss paths.
-    - name: Set native-utilities datadir env vars
-      run: |
-        echo "alex_datadir=$HOME/.native-utils/share/alex-${ALEX_VERSION}" >> "$GITHUB_ENV"
-        echo "happy_datadir=$HOME/.native-utils/share/happy-${HAPPY_VERSION}" >> "$GITHUB_ENV"
-
-    - name: Add native-utilities dir to PATH (exact hit)
-      if: steps.native-utils-cache-restore.outputs.cache-hit == 'true'
-      run: echo "$HOME/.native-utils" >> "$GITHUB_PATH"
-
-    - name: Validate restored native utilities (exact hit)
-      if: steps.native-utils-cache-restore.outputs.cache-hit == 'true'
-      run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-native-utils.sh"
-
-    - name: Install native utilities (exact miss)
-      if: steps.native-utils-cache-restore.outputs.cache-hit != 'true'
-      id: install-native-utils
-      run: |
-        echo ">>> Update cabal"
-        ~/.ghc-wasm/cabal/bin/cabal update
-        echo ">>> Install alex and happy"
-        mkdir -p ~/.native-utils
-        ~/.ghc-wasm/cabal/bin/cabal install \
-          --with-compiler="$HOST_GHC_BIN" \
-          --installdir="$HOME/.native-utils" --install-method=copy --overwrite-policy=always \
-          "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
-        echo "$HOME/.native-utils" >> "$GITHUB_PATH"
-
-        echo ">>> Copy alex/happy datadirs into the cached payload"
-        mkdir -p "${alex_datadir}" "${happy_datadir}"
-        alex_store_share="$(find "$HOME/.local/state/cabal/store" -type d -path "*/alex-${ALEX_VERSION}-*/share" | head -1)"
-        happy_store_share="$(find "$HOME/.local/state/cabal/store" -type d -path "*/happy-${HAPPY_VERSION}-*/share" | head -1)"
-        [ -n "${alex_store_share}" ] || { echo "::error::could not locate alex's installed share directory" >&2; exit 1; }
-        [ -n "${happy_store_share}" ] || { echo "::error::could not locate happy's installed share directory" >&2; exit 1; }
-        cp -R "${alex_store_share}/." "${alex_datadir}/"
-        cp -R "${happy_store_share}/." "${happy_datadir}/"
-
-    - name: Validate installed native utilities (after install)
-      if: steps.install-native-utils.outcome == 'success'
-      run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-native-utils.sh"
-
-    - name: Cache native utilities (Agda 2.8.0 is the sole writer)
-      if: >
-        matrix.agda.name == '2.8.0' &&
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
-        steps.native-utils-cache-restore.outputs.cache-hit != 'true' &&
-        steps.install-native-utils.outcome == 'success'
-      uses: actions/cache/save@v4
-      with:
-        path: ~/.native-utils
-        key: ${{ env.NATIVE_UTILS_KEY }}
-
-    - name: Checkout Agda submodule at v${{ matrix.agda.name }}
-      run: |
-        cd als/wasm-submodules/agda
-        git fetch --depth 1 origin "${{ matrix.agda.commit }}"
-        git checkout FETCH_HEAD
-        echo "AGDA_WASM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-    - name: Resolve network submodule revision
-      run: echo "NETWORK_SUBMODULE_COMMIT=$(git -C als/wasm-submodules/network rev-parse HEAD)" >> "$GITHUB_ENV"
-
-    # Downstream propagation: a gitlink-only bump of the network submodule
-    # doesn't change the text of any file hashFiles() can see, so it's
-    # resolved and hashed explicitly. The WASM toolchain and native-utils
-    # producer hashes are folded in too (summarized via sha256 to stay
-    # under the cache-key length limit), so a compiler or tool-installation
-    # change also invalidates this downstream build.
-    #
-    # DEPS_FINGERPRINT: only package.yaml's dependency-affecting content --
-    # every 'dependencies:' list, wherever nested under flag/arch 'when:'
-    # conditions -- extracted structurally via yq rather than hashing the
-    # whole file. This job only ever runs 'cabal build lib:agda' and
-    # 'cabal build --dependencies-only', neither of which is affected by
-    # the package's own version, metadata, or ghc-options (e.g. dropping
-    # -with-rtsopts), so those must not invalidate this cache; a version
-    # bump previously did (~55-60 min of unnecessary rebuild). Hashing
-    # package.yaml rather than the generated agda-language-server.cabal
-    # is correct because this job regenerates that file itself from
-    # package.yaml (see the hpack step above), never from a committed
-    # copy. cabal.project.wasm32 is still hashed in full: every line in it
-    # (index-state, constraints, packages, source-repository-package
-    # pins) is dependency-relevant.
-    - name: Compute dist-newstyle cache key
-      id: dist-newstyle-cache-key
-      run: |
-        PRODUCER_HASH=$(printf '%s' "${{ env.WASM_TOOLCHAIN_KEY }}-${{ env.NATIVE_UTILS_KEY }}" | sha256sum | cut -d' ' -f1)
-        DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' als/package.yaml | sha256sum | cut -d' ' -f1)
-        echo "key=dist-newstyle-v3-${{ env.CI_CACHE_KEY }}-agda-${{ env.AGDA_WASM_COMMIT }}-net-${{ env.NETWORK_SUBMODULE_COMMIT }}-producers-${PRODUCER_HASH}-${{ hashFiles('als/cabal.project.wasm32') }}-${DEPS_FINGERPRINT}" >> "$GITHUB_OUTPUT"
-
-    - name: Restore dist-newstyle cache for resolved Agda revision
-      id: dist-newstyle-cache-restore-resolved
-      uses: actions/cache/restore@v4
-      with:
-        path: als/dist-newstyle
-        key: ${{ steps.dist-newstyle-cache-key.outputs.key }}
-
-    # Cabal global package store (step 7 finding): 'wasm32-wasi-cabal path'
-    # reports store-dir as ~/.ghc-wasm/.cabal/store -- inside the toolchain
-    # payload, but populated only by the dependency builds below, which run
-    # after the toolchain cache (see 'Cache ghc-wasm-meta' above) has
-    # already been saved. So the toolchain cache never captures it, and
-    # every third-party Hackage dependency was being rebuilt from scratch
-    # on every run regardless of the dist-newstyle cache's hit/miss state.
-    # The store is content-addressed, but a single key shared by all 3
-    # Agda matrix entries (v1) let whichever entry wrote it last silently
-    # decide what every other entry restores: only Agda 2.8.0 could write
-    # it, so once it built a hashable version that 2.6.4.3 doesn't use,
-    # 2.6.4.3 restored an exact hit that still lacked its own dependencies
-    # and rebuilt them on every run. v2 keys the store per matrix entry
-    # (folding in the resolved Agda/network commits and the dependency
-    # fingerprint, alongside the toolchain/native-utils producer hash) and
-    # lets every entry save its own; restore-keys falls back to the old v1
-    # prefix so a v2 miss still reuses whatever the shared store built.
-    - name: Compute cabal store cache key
-      working-directory: './als'
-      run: |
-        DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
-        PRODUCER_HASH=$(printf '%s' "${{ env.WASM_TOOLCHAIN_KEY }}-${{ env.NATIVE_UTILS_KEY }}" | sha256sum | cut -d' ' -f1)
-        PROJECT_HASH="${{ hashFiles('als/cabal.project.wasm32') }}"
-        echo "CABAL_STORE_KEY=cabal-store-v2-${PRODUCER_HASH}-agda-${{ env.AGDA_WASM_COMMIT }}-net-${{ env.NETWORK_SUBMODULE_COMMIT }}-${PROJECT_HASH}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
-        echo "CABAL_STORE_FALLBACK_KEY=cabal-store-v1-${{ env.WASM_TOOLCHAIN_KEY }}-${PROJECT_HASH}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
-
-    - name: Restore cabal global store cache
-      id: cabal-store-cache-restore
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.ghc-wasm/.cabal/store
-        key: ${{ env.CABAL_STORE_KEY }}
-        restore-keys: |
-          ${{ env.CABAL_STORE_FALLBACK_KEY }}
-
-    - name: 📋 Cache summary
-      run: |
-        {
-          echo "### Cache summary (${{ matrix.agda.name }}, ${{ runner.os }}/${{ runner.arch }})"
-          echo "| cache | hit | key |"
-          echo "|---|---|---|"
-          echo "| toolchain | ${{ steps.ghc-wasm-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.WASM_TOOLCHAIN_KEY }}\` |"
-          echo "| native-utils | ${{ steps.native-utils-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.NATIVE_UTILS_KEY }}\` |"
-          echo "| cabal-store | ${{ steps.cabal-store-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.CABAL_STORE_KEY }}\` |"
-          echo "| dist-newstyle | ${{ steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit || 'false' }} | \`${{ steps.dist-newstyle-cache-key.outputs.key }}\` |"
-        } >> "$GITHUB_STEP_SUMMARY"
-
-    - name: Cabal configure
-      working-directory: './als'
-      run: |
-        mv cabal.project.wasm32 cabal.project
-        wasm32-wasi-cabal configure --flag=Agda-${{ matrix.agda.flag }}
-
-    - name: Build Agda as dependency
-      id: build-dep-agda
-      working-directory: './als'
-      run: wasm32-wasi-cabal build lib:agda
-
-    - name: Build dependencies other than Agda
-      id: build-deps-other-than-agda
-      working-directory: './als'
-      run: |
-        # Setup network submodule autotools
-        cd wasm-submodules/network
-        autoreconf -i
-        cd ../..
-        # Build all dependencies (cabal git deps + network submodule)
-        wasm32-wasi-cabal build --dependencies-only
-
-    - name: Cache dist-newstyle
-      uses: actions/cache/save@v4
-      if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
-        steps.build-deps-other-than-agda.outcome == 'success' &&
-        steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit != 'true'
-      with:
-        path: als/dist-newstyle
-        key: ${{ steps.dist-newstyle-cache-key.outputs.key }}
-
-    - name: Save cabal global store cache
-      if: >
-        github.event_name == 'push' && github.ref == 'refs/heads/master' &&
-        steps.cabal-store-cache-restore.outputs.cache-hit != 'true' &&
-        steps.build-deps-other-than-agda.outcome == 'success'
-      uses: actions/cache/save@v4
-      with:
-        path: ~/.ghc-wasm/.cabal/store
-        key: ${{ env.CABAL_STORE_KEY }}
-
-    - name: Build als
-      working-directory: './als'
-      run: |
-        mkdir ~/out
-        wasm32-wasi-cabal build
-        WASM_BINARY_PATH=$(wasm32-wasi-cabal list-bin als)
-        cp "$WASM_BINARY_PATH" ~/out/${WASM_ASSET_BASENAME}.wasm
-        echo "WASM_BINARY_NAME=${WASM_ASSET_BASENAME}.wasm" >> $GITHUB_ENV
-
-    - name: 📤 Upload WASM artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.WASM_ASSET_BASENAME }}
-        path: ~/out/${{ env.WASM_BINARY_NAME }}
-        if-no-files-found: error
-        retention-days: 7
-
+          echo ">>> Copy alex/happy datadirs into the cached payload"
+          mkdir -p "${alex_datadir}" "${happy_datadir}"
+          alex_store_share="$(find "$HOME/.local/state/cabal/store" -type d -path "*/alex-${ALEX_VERSION}-*/share" | head -1)"
+          happy_store_share="$(find "$HOME/.local/state/cabal/store" -type d -path "*/happy-${HAPPY_VERSION}-*/share" | head -1)"
+          [ -n "${alex_store_share}" ] || { echo "::error::could not locate alex's installed share directory" >&2; exit 1; }
+          [ -n "${happy_store_share}" ] || { echo "::error::could not locate happy's installed share directory" >&2; exit 1; }
+          cp -R "${alex_store_share}/." "${alex_datadir}/"
+          cp -R "${happy_store_share}/." "${happy_datadir}/"
+      - name: Validate installed native utilities (after install)
+        if: steps.install-native-utils.outcome == 'success'
+        run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-native-utils.sh"
+      - name: Cache native utilities (Agda 2.8.0 is the sole writer)
+        if: |
+          matrix.agda.name == '2.8.0' && github.ref == 'refs/heads/probe/cache-verification' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.native-utils-cache-restore.outputs.cache-hit != 'true' && steps.install-native-utils.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.native-utils
+          key: ${{ env.NATIVE_UTILS_KEY }}
+      - name: Checkout Agda submodule at v${{ matrix.agda.name }}
+        run: |
+          cd als/wasm-submodules/agda
+          git fetch --depth 1 origin "${{ matrix.agda.commit }}"
+          git checkout FETCH_HEAD
+          echo "AGDA_WASM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Resolve network submodule revision
+        run: echo "NETWORK_SUBMODULE_COMMIT=$(git -C als/wasm-submodules/network rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Compute dist-newstyle cache key
+        id: dist-newstyle-cache-key
+        run: |
+          PRODUCER_HASH=$(printf '%s' "${{ env.WASM_TOOLCHAIN_KEY }}-${{ env.NATIVE_UTILS_KEY }}" | sha256sum | cut -d' ' -f1)
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' als/package.yaml | sha256sum | cut -d' ' -f1)
+          echo "key=dist-newstyle-v3-${{ env.CI_CACHE_KEY }}-agda-${{ env.AGDA_WASM_COMMIT }}-net-${{ env.NETWORK_SUBMODULE_COMMIT }}-producers-${PRODUCER_HASH}-${{ hashFiles('als/cabal.project.wasm32') }}-${DEPS_FINGERPRINT}" >> "$GITHUB_OUTPUT"
+      - name: Restore dist-newstyle cache for resolved Agda revision
+        id: dist-newstyle-cache-restore-resolved
+        uses: actions/cache/restore@v4
+        with:
+          path: als/dist-newstyle
+          key: ${{ steps.dist-newstyle-cache-key.outputs.key }}
+      - name: Compute cabal store cache key
+        working-directory: ./als
+        run: |
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
+          PRODUCER_HASH=$(printf '%s' "${{ env.WASM_TOOLCHAIN_KEY }}-${{ env.NATIVE_UTILS_KEY }}" | sha256sum | cut -d' ' -f1)
+          PROJECT_HASH="${{ hashFiles('als/cabal.project.wasm32') }}"
+          echo "CABAL_STORE_KEY=cabal-store-v2-${PRODUCER_HASH}-agda-${{ env.AGDA_WASM_COMMIT }}-net-${{ env.NETWORK_SUBMODULE_COMMIT }}-${PROJECT_HASH}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
+          echo "CABAL_STORE_FALLBACK_KEY=cabal-store-v1-${{ env.WASM_TOOLCHAIN_KEY }}-${PROJECT_HASH}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
+      - name: Restore cabal global store cache
+        id: cabal-store-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ghc-wasm/.cabal/store
+          key: ${{ env.CABAL_STORE_KEY }}
+          restore-keys: |
+            ${{ env.CABAL_STORE_FALLBACK_KEY }}
+      - name: "\U0001F4CB Cache summary"
+        run: |
+          {
+            echo "### Cache summary (${{ matrix.agda.name }}, ${{ runner.os }}/${{ runner.arch }})"
+            echo "| cache | hit | key |"
+            echo "|---|---|---|"
+            echo "| toolchain | ${{ steps.ghc-wasm-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.WASM_TOOLCHAIN_KEY }}\` |"
+            echo "| native-utils | ${{ steps.native-utils-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.NATIVE_UTILS_KEY }}\` |"
+            echo "| cabal-store | ${{ steps.cabal-store-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.CABAL_STORE_KEY }}\` |"
+            echo "| dist-newstyle | ${{ steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit || 'false' }} | \`${{ steps.dist-newstyle-cache-key.outputs.key }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Cabal configure
+        working-directory: ./als
+        run: |
+          mv cabal.project.wasm32 cabal.project
+          wasm32-wasi-cabal configure --flag=Agda-${{ matrix.agda.flag }}
+      - name: Build Agda as dependency
+        id: build-dep-agda
+        working-directory: ./als
+        run: wasm32-wasi-cabal build lib:agda
+      - name: Build dependencies other than Agda
+        id: build-deps-other-than-agda
+        working-directory: ./als
+        run: |
+          # Setup network submodule autotools
+          cd wasm-submodules/network
+          autoreconf -i
+          cd ../..
+          # Build all dependencies (cabal git deps + network submodule)
+          wasm32-wasi-cabal build --dependencies-only
+      - name: Cache dist-newstyle
+        uses: actions/cache/save@v4
+        if: |
+          github.ref == 'refs/heads/probe/cache-verification' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps-other-than-agda.outcome == 'success' && steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit != 'true'
+        with:
+          path: als/dist-newstyle
+          key: ${{ steps.dist-newstyle-cache-key.outputs.key }}
+      - name: Save cabal global store cache
+        if: |
+          github.ref == 'refs/heads/probe/cache-verification' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.cabal-store-cache-restore.outputs.cache-hit != 'true' && steps.build-deps-other-than-agda.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ghc-wasm/.cabal/store
+          key: ${{ env.CABAL_STORE_KEY }}
+      - name: Build als
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        working-directory: ./als
+        run: |
+          mkdir ~/out
+          wasm32-wasi-cabal build
+          WASM_BINARY_PATH=$(wasm32-wasi-cabal list-bin als)
+          cp "$WASM_BINARY_PATH" ~/out/${WASM_ASSET_BASENAME}.wasm
+          echo "WASM_BINARY_NAME=${WASM_ASSET_BASENAME}.wasm" >> $GITHUB_ENV
+      - name: "\U0001F4E4 Upload WASM artifact"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WASM_ASSET_BASENAME }}
+          path: ~/out/${{ env.WASM_BINARY_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+    if: github.event_name == 'push'
   publish-dev:
     name: Publish Dev Release
-    needs: [check-cabal-drift, build-and-test, verify-native-artifact, build-wasm]
+    needs:
+      - check-cabal-drift
+      - build-and-test
+      - verify-native-artifact
+      - build-wasm
     if: always() && !cancelled() && !contains(needs.*.result, 'failure') && github.ref == 'refs/heads/master' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -1143,59 +907,57 @@ jobs:
       group: publish-dev
       cancel-in-progress: true
     steps:
+      - name: "\U0001F4E5 Download dev artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: als-dev-*
+          path: artifacts
+      - name: "\U0001F6A2 Create/Update Dev Release"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete existing dev release if it exists
+          gh release delete dev --cleanup-tag -y --repo "${{ github.repository }}" || true
 
-    - name: 📥 Download dev artifacts
-      uses: actions/download-artifact@v4
-      with:
-        pattern: als-dev-*
-        path: artifacts
+          # Wait for GitHub to process the deletion to avoid race condition
+          # that causes releases to be created as drafts
+          # See: https://github.com/cli/cli/issues/8458
+          sleep 5
 
-    - name: 🚢 Create/Update Dev Release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        # Delete existing dev release if it exists
-        gh release delete dev --cleanup-tag -y --repo "${{ github.repository }}" || true
-
-        # Wait for GitHub to process the deletion to avoid race condition
-        # that causes releases to be created as drafts
-        # See: https://github.com/cli/cli/issues/8458
-        sleep 5
-
-        # Create new dev pre-release
-        gh release create dev \
-          --title "Development Release (dev)" \
-          --notes "Development pre-release build from latest changes. This is a pre-release for testing purposes." \
-          --prerelease \
-          --repo "${{ github.repository }}"
-
-    - name: 🚢 Upload artifacts to dev release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        cd artifacts
-        for dir in */; do
-          artifact_name="${dir%/}"
-          echo "Uploading ${artifact_name}..."
-          if [ -f "${artifact_name}/${artifact_name}.zip" ]; then
-            gh release upload dev "${artifact_name}/${artifact_name}.zip" --clobber --repo "${{ github.repository }}"
-          else
-            artifact_file=$(find "${artifact_name}" -maxdepth 1 -type f | head -1)
-            if [ -n "$artifact_file" ]; then
-              gh release upload dev "$artifact_file" --clobber --repo "${{ github.repository }}"
+          # Create new dev pre-release
+          gh release create dev \
+            --title "Development Release (dev)" \
+            --notes "Development pre-release build from latest changes. This is a pre-release for testing purposes." \
+            --prerelease \
+            --repo "${{ github.repository }}"
+      - name: "\U0001F6A2 Upload artifacts to dev release"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd artifacts
+          for dir in */; do
+            artifact_name="${dir%/}"
+            echo "Uploading ${artifact_name}..."
+            if [ -f "${artifact_name}/${artifact_name}.zip" ]; then
+              gh release upload dev "${artifact_name}/${artifact_name}.zip" --clobber --repo "${{ github.repository }}"
             else
-              echo "Warning: No uploadable file found in ${artifact_name}"
+              artifact_file=$(find "${artifact_name}" -maxdepth 1 -type f | head -1)
+              if [ -n "$artifact_file" ]; then
+                gh release upload dev "$artifact_file" --clobber --repo "${{ github.repository }}"
+              else
+                echo "Warning: No uploadable file found in ${artifact_name}"
+              fi
             fi
-          fi
-        done
-
+          done
   publish-release:
     name: Publish Release
-    needs: [check-cabal-drift, build-and-test, verify-native-artifact, build-wasm]
-    if: >
-      always() && !cancelled() && !contains(needs.*.result, 'failure') &&
-      github.ref == 'refs/heads/master' && github.event_name == 'push' &&
-      github.repository == 'agda/agda-language-server'
+    needs:
+      - check-cabal-drift
+      - build-and-test
+      - verify-native-artifact
+      - build-wasm
+    if: |
+      always() && !cancelled() && !contains(needs.*.result, 'failure') && github.ref == 'refs/heads/master' && github.event_name == 'push' && github.repository == 'agda/agda-language-server'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1204,546 +966,430 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-
-    - name: 📥 Checkout repository
-      uses: actions/checkout@v4
-
-    - name: 🏗 Setup Cabal
-      uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d # v2
-      with:
-        ghc-version: '9.10.2'
-        cabal-version: '3.12.1.0'
-
-    # Inspect: no downloads of this run's own artifacts yet. Establishes
-    # VERSION/TAG and whether this version is already fully published, by
-    # checking the already-published release's own recorded state (never
-    # by rebuilding/comparing this run's freshly built binaries/sdist --
-    # source keeps changing between releases at the same version, so that
-    # comparison would fail on almost every push after a release).
-    - name: 🔍 Inspect — parse version and compute tag
-      run: |
-        VERSION=$(yq -r '.version' package.yaml)
-        if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
-          echo "::error::invalid or missing version in package.yaml: '${VERSION}'"
-          exit 1
-        fi
-        TAG="v${VERSION}"
-        echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-        echo "TAG=${TAG}"         >> "$GITHUB_ENV"
-        echo "Version: ${VERSION} (tag ${TAG})"
-
-    # Addressed by release ID from here on, never by the 'releases/tags/'
-    # REST shortcut -- that endpoint only resolves published releases and
-    # 404s on a draft, which is exactly the state staging must inspect.
-    - name: 🔍 Inspect — look up existing GitHub release and tag
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        RELEASE_JSON=$(gh api "repos/${{ github.repository }}/releases" --paginate \
-          --jq "[.[] | select(.tag_name == \"${TAG}\")] | .[0] // empty")
-        echo "${RELEASE_JSON:-null}" > release.json
-        cat release.json
-
-        # Only an explicit 404 means the tag is absent; every other lookup
-        # failure (auth, rate limit, network, 5xx) must stop before
-        # mutation, not be conflated with absence.
-        if TAG_REF_JSON=$(gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" 2>tag-ref-err.txt); then
-          REMOTE_TAG_SHA=$(echo "$TAG_REF_JSON" | jq -r '.object.sha')
-        elif grep -q "HTTP 404" tag-ref-err.txt; then
-          REMOTE_TAG_SHA=""
-        else
-          echo "::error::failed to look up tag ${TAG}: $(cat tag-ref-err.txt)"
-          exit 1
-        fi
-        echo "REMOTE_TAG_SHA=${REMOTE_TAG_SHA}" >> "$GITHUB_ENV"
-
-        if [[ -s release.json && "$(cat release.json)" != "null" ]]; then
-          RELEASE_ID=$(jq -r '.id' release.json)
-          RELEASE_DRAFT=$(jq -r '.draft' release.json)
-          RELEASE_SHA=$(jq -r '.target_commitish' release.json)
-        else
-          RELEASE_ID=""
-          RELEASE_DRAFT=""
-          RELEASE_SHA=""
-        fi
-        {
-          echo "RELEASE_ID=${RELEASE_ID}"
-          echo "RELEASE_DRAFT=${RELEASE_DRAFT}"
-          echo "RELEASE_SHA=${RELEASE_SHA}"
-        } >> "$GITHUB_ENV"
-
-    # Only 404 (absent) and 200 (present) are known states. Any other
-    # response -- 403, 500, a network failure -- must fail without
-    # mutating anything, not be silently treated as absence.
-    - name: 🔍 Inspect — check Hackage for this version
-      run: |
-        HACKAGE_URL="https://hackage.haskell.org/package/agda-language-server-${VERSION}/agda-language-server-${VERSION}.tar.gz"
-        HTTP_CODE=$(curl -sL -o hackage-tarball.tar.gz -w '%{http_code}' "$HACKAGE_URL" || echo "000")
-        if [[ "$HTTP_CODE" == "200" ]]; then
-          HACKAGE_DIGEST=$(sha256sum hackage-tarball.tar.gz | cut -d' ' -f1)
-        elif [[ "$HTTP_CODE" == "404" ]]; then
-          HACKAGE_DIGEST=""
-          rm -f hackage-tarball.tar.gz
-        else
-          echo "::error::unexpected Hackage response ${HTTP_CODE} while checking ${HACKAGE_URL}"
-          exit 1
-        fi
-        echo "HACKAGE_HTTP_CODE=${HTTP_CODE}"   >> "$GITHUB_ENV"
-        echo "HACKAGE_DIGEST=${HACKAGE_DIGEST}" >> "$GITHUB_ENV"
-        echo "Hackage: HTTP ${HTTP_CODE}, digest ${HACKAGE_DIGEST:-<none>}"
-
-    # Classify into exactly one of the states the plan allows, and fail
-    # without any mutation on every conflicting combination -- this is
-    # the one place that decides whether it's safe to proceed, run
-    # *before* anything below is allowed to touch GitHub or Hackage.
-    #
-    #   ALREADY_PUBLISHED  published release, tag resolves to it, and its
-    #                      assets verify exactly against Hackage -- exit
-    #                      success, no mutation.
-    #   ABSENT             no release, no orphan tag, Hackage 404.
-    #   DRAFT_FOR_SHA      a draft for this exact commit already exists;
-    #                      refined into DRAFT_ABSENT/DRAFT_MATCHING once
-    #                      this run's own sdist digest is known (Download,
-    #                      below) since only then can "matches Hackage"
-    #                      be evaluated.
-    #   (anything else)    CONFLICT -- fail immediately.
-    - name: 🔍 Inspect — classify state, reject conflicts before any mutation
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        conflict() { echo "::error::conflict: $1"; exit 1; }
-
-        if [[ -z "$RELEASE_ID" ]]; then
-          # No release for this tag. An orphan tag, or Hackage already
-          # having this version with nothing to show for it on GitHub,
-          # are both conflicts -- not "absent".
-          [[ -z "$REMOTE_TAG_SHA" ]] || conflict "tag ${TAG} exists with no matching release (points at ${REMOTE_TAG_SHA})"
-          [[ "$HACKAGE_HTTP_CODE" != "200" ]] || conflict "Hackage already has ${VERSION} but no GitHub release exists for ${TAG}"
-          echo "STATE=ABSENT" >> "$GITHUB_ENV"
-          exit 0
-        fi
-
-        if [[ "$RELEASE_DRAFT" == "false" ]]; then
-          # Published release for this tag: tag must resolve to its own
-          # recorded SHA, and its assets must verify exactly -- a
-          # published release is never auto-repaired, only accepted or
-          # rejected as a conflict.
-          [[ "$REMOTE_TAG_SHA" == "$RELEASE_SHA" ]] || conflict "tag ${TAG} resolves to ${REMOTE_TAG_SHA}, but release ${TAG} records ${RELEASE_SHA}"
-          [[ "$HACKAGE_HTTP_CODE" == "200" ]] || conflict "release ${TAG} is published but Hackage has no ${VERSION} tarball"
-
-          SUMS_ASSET=$(jq -c '.assets[] | select(.name == "SHA256SUMS")' release.json)
-          [[ -n "$SUMS_ASSET" ]] || conflict "release ${TAG} is published but has no SHA256SUMS asset"
-          SUMS_URL=$(echo "$SUMS_ASSET" | jq -r '.browser_download_url')
-          SUMS_EXPECTED_DIGEST=$(echo "$SUMS_ASSET" | jq -r '.digest // empty' | sed 's/^sha256://')
-          curl -sL -o SHA256SUMS "$SUMS_URL"
-          SUMS_ACTUAL_DIGEST=$(sha256sum SHA256SUMS | cut -d' ' -f1)
-          [[ -n "$SUMS_EXPECTED_DIGEST" && "$SUMS_ACTUAL_DIGEST" == "$SUMS_EXPECTED_DIGEST" ]] \
-            || conflict "downloaded SHA256SUMS digest ${SUMS_ACTUAL_DIGEST} != GitHub-reported ${SUMS_EXPECTED_DIGEST:-<none>}"
-
-          MANIFEST_COUNT=$(grep -c . SHA256SUMS || true)
-          [[ "$MANIFEST_COUNT" -gt 0 ]] || conflict "SHA256SUMS for ${TAG} is empty"
-
-          REMOTE_ASSET_NAMES=$(jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' release.json | sort)
-          MANIFEST_NAMES=$(awk '{print $2}' SHA256SUMS | sort)
-          [[ "$REMOTE_ASSET_NAMES" == "$MANIFEST_NAMES" ]] || conflict "release ${TAG} asset set doesn't match its own SHA256SUMS manifest exactly"
-
-          # Self-consistency (checked above) isn't completeness: a release
-          # whose binaries and their manifest entries were both removed
-          # together would still pass that check. Require the exact same
-          # deterministic 15-binary-plus-sdist matrix enforced on the
-          # fresh-draft path, not just internal agreement.
-          EXPECTED_RELEASE_ASSETS=$(printf '%s\n' \
-            "als-v${VERSION}-Agda-2.8.0-ubuntu.zip"   "als-v${VERSION}-Agda-2.8.0-macos-arm64.zip"   "als-v${VERSION}-Agda-2.8.0-macos-x64.zip"   "als-v${VERSION}-Agda-2.8.0-windows.zip" \
-            "als-v${VERSION}-Agda-2.7.0.1-ubuntu.zip" "als-v${VERSION}-Agda-2.7.0.1-macos-arm64.zip" "als-v${VERSION}-Agda-2.7.0.1-macos-x64.zip" "als-v${VERSION}-Agda-2.7.0.1-windows.zip" \
-            "als-v${VERSION}-Agda-2.6.4.3-ubuntu.zip" "als-v${VERSION}-Agda-2.6.4.3-macos-arm64.zip" "als-v${VERSION}-Agda-2.6.4.3-macos-x64.zip" "als-v${VERSION}-Agda-2.6.4.3-windows.zip" \
-            "als-v${VERSION}-Agda-2.8.0-wasm.wasm" "als-v${VERSION}-Agda-2.7.0.1-wasm.wasm" "als-v${VERSION}-Agda-2.6.4.3-wasm.wasm" \
-            "agda-language-server-${VERSION}.tar.gz" | sort)
-          [[ "$MANIFEST_NAMES" == "$EXPECTED_RELEASE_ASSETS" ]] || conflict "release ${TAG}'s asset set doesn't match the expected 15-binary-plus-sdist matrix"
-
-          EXPECTED_SDIST_NAME="agda-language-server-${VERSION}.tar.gz"
-          SDIST_ENTRIES=$(echo "$MANIFEST_NAMES" | grep -Fxc "$EXPECTED_SDIST_NAME" || true)
-          [[ "$SDIST_ENTRIES" -eq 1 ]] || conflict "SHA256SUMS for ${TAG} doesn't have exactly one entry named ${EXPECTED_SDIST_NAME} (found ${SDIST_ENTRIES})"
-
-          MISMATCH=false
-          while read -r digest name; do
-            [[ -z "$name" ]] && continue
-            ASSET=$(jq -c --arg n "$name" '.assets[] | select(.name == $n)' release.json)
-            ASSET_DIGEST=$(echo "$ASSET" | jq -r '.digest // empty' | sed 's/^sha256://')
-            ASSET_SIZE=$(echo "$ASSET" | jq -r '.size // empty')
-            [[ "$ASSET_DIGEST" == "$digest" ]] || MISMATCH=true
-            if [[ "$name" == "$EXPECTED_SDIST_NAME" ]]; then
-              [[ "$digest" == "$HACKAGE_DIGEST" ]] || MISMATCH=true
-            fi
-            [[ -n "$ASSET_SIZE" ]] || MISMATCH=true
-          done < SHA256SUMS
-          [[ "$MISMATCH" == "false" ]] || conflict "release ${TAG} assets don't all verify against SHA256SUMS/Hackage"
-
-          echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
-          echo "Already published and verified: ${TAG}"
-          exit 0
-        fi
-
-        # Draft. Never touch a draft that isn't pinned to this exact run,
-        # and the version tag itself must not already exist -- a draft
-        # never creates the actual tag ref until it's published, so a
-        # non-empty tag alongside a draft means something else (a stale
-        # published-then-deleted release, a manually pushed tag) already
-        # claims this version.
-        [[ "$RELEASE_SHA" == "${{ github.sha }}" ]] || conflict "draft ${TAG} exists for a different SHA (${RELEASE_SHA} != ${{ github.sha }}); refusing to touch it"
-        [[ -z "$REMOTE_TAG_SHA" ]] || conflict "tag ${TAG} already exists (points at ${REMOTE_TAG_SHA}) while an unpublished draft for this SHA is also present"
-        echo "STATE=DRAFT_FOR_SHA" >> "$GITHUB_ENV"
-
-    # Download: only reached for ABSENT or DRAFT_FOR_SHA -- staging a new
-    # release or resuming this run's own draft. No mutation yet.
-    - name: 📥 Download this run's release artifacts
-      if: env.ALREADY_PUBLISHED != 'true'
-      uses: actions/download-artifact@v4
-      with:
-        pattern: 'als-dev-*'
-        path: artifacts
-
-    - name: 📥 Download this run's Hackage sdist
-      if: env.ALREADY_PUBLISHED != 'true'
-      uses: actions/download-artifact@v4
-      with:
-        name: hackage-sdist
-        path: artifacts/hackage-sdist
-
-    # The build matrix is fixed (build-and-test.yaml: 4 OS x 3 Agda
-    # versions = 12 native, build-wasm: 3 Agda versions = 3 WASM). A
-    # retry after one Actions artifact has separately expired/been
-    # deleted must fail here, not silently stage a release missing that
-    # matrix output.
-    - name: 🔍 Confirm all expected build artifacts are present
-      if: env.ALREADY_PUBLISHED != 'true'
-      run: |
-        EXPECTED=(
-          als-dev-Agda-2.8.0-ubuntu   als-dev-Agda-2.8.0-macos-arm64   als-dev-Agda-2.8.0-macos-x64   als-dev-Agda-2.8.0-windows
-          als-dev-Agda-2.7.0.1-ubuntu als-dev-Agda-2.7.0.1-macos-arm64 als-dev-Agda-2.7.0.1-macos-x64 als-dev-Agda-2.7.0.1-windows
-          als-dev-Agda-2.6.4.3-ubuntu als-dev-Agda-2.6.4.3-macos-arm64 als-dev-Agda-2.6.4.3-macos-x64 als-dev-Agda-2.6.4.3-windows
-          als-dev-Agda-2.8.0-wasm als-dev-Agda-2.7.0.1-wasm als-dev-Agda-2.6.4.3-wasm
-        )
-        EXPECTED_SORTED=$(printf '%s\n' "${EXPECTED[@]}" | sort)
-        # Restricted to 'als-dev-*': 'artifacts/hackage-sdist' (downloaded
-        # separately, checked in the next step) lives alongside these at
-        # the same depth and must not be counted as a sixteenth artifact.
-        ACTUAL_SORTED=$(find artifacts -mindepth 1 -maxdepth 1 -type d -name 'als-dev-*' -printf '%f\n' | sort)
-        if [[ "$EXPECTED_SORTED" != "$ACTUAL_SORTED" ]]; then
-          echo "::error::downloaded artifact set doesn't match the expected 15-artifact build matrix"
-          diff <(echo "$EXPECTED_SORTED") <(echo "$ACTUAL_SORTED") || true
-          exit 1
-        fi
-        echo "All ${#EXPECTED[@]} expected build artifacts present."
-
-    - name: 🔍 Confirm sdist, compute digests, refine DRAFT_FOR_SHA
-      if: env.ALREADY_PUBLISHED != 'true'
-      run: |
-        mapfile -t SDISTS < <(find artifacts/hackage-sdist -name '*.tar.gz')
-        [[ "${#SDISTS[@]}" -eq 1 ]] || { echo "::error::expected exactly one sdist in hackage-sdist artifact, found ${#SDISTS[@]}"; exit 1; }
-        SDIST="${SDISTS[0]}"
-        BASENAME=$(basename "$SDIST")
-        if [[ "$BASENAME" != "agda-language-server-${VERSION}.tar.gz" ]]; then
-          echo "::error::sdist ${BASENAME} does not embed expected version ${VERSION}"
-          exit 1
-        fi
-        echo "SDIST_PATH=${SDIST}" >> "$GITHUB_ENV"
-        SDIST_DIGEST=$(sha256sum "$SDIST" | cut -d' ' -f1)
-        echo "SDIST_DIGEST=${SDIST_DIGEST}" >> "$GITHUB_ENV"
-
-        # Only now, with this run's own sdist digest known, can
-        # Draft-for-this-SHA be refined against Hackage: comparing this
-        # run's content against Hackage is only meaningful because this
-        # run is the one that would be responsible for that content.
-        if [[ "$STATE" == "DRAFT_FOR_SHA" ]]; then
-          if [[ "$HACKAGE_HTTP_CODE" == "200" ]]; then
-            if [[ "$HACKAGE_DIGEST" == "$SDIST_DIGEST" ]]; then
-              echo "STATE=DRAFT_MATCHING" >> "$GITHUB_ENV"
-            else
-              echo "::error::conflict: Hackage already has ${VERSION} with a tarball that doesn't match this run's sdist"
-              exit 1
-            fi
-          else
-            echo "STATE=DRAFT_ABSENT" >> "$GITHUB_ENV"
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+      - name: "\U0001F3D7 Setup Cabal"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: 9.10.2
+          cabal-version: 3.12.1.0
+      - name: "\U0001F50D Inspect — parse version and compute tag"
+        run: |
+          VERSION=$(yq -r '.version' package.yaml)
+          if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::invalid or missing version in package.yaml: '${VERSION}'"
+            exit 1
           fi
-        fi
+          TAG="v${VERSION}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "TAG=${TAG}"         >> "$GITHUB_ENV"
+          echo "Version: ${VERSION} (tag ${TAG})"
+      - name: "\U0001F50D Inspect — look up existing GitHub release and tag"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_JSON=$(gh api "repos/${{ github.repository }}/releases" --paginate \
+            --jq "[.[] | select(.tag_name == \"${TAG}\")] | .[0] // empty")
+          echo "${RELEASE_JSON:-null}" > release.json
+          cat release.json
 
-    # Stage (mutation from here on): rename to als-v<VERSION>-* preserving
-    # each asset's own extension (not the artifact directory's name),
-    # generate SHA256SUMS over every payload asset including the sdist.
-    - name: 🏗 Stage — rename assets and generate manifest
-      if: env.ALREADY_PUBLISHED != 'true'
-      run: |
-        mkdir -p release-assets
-        cp "$SDIST_PATH" "release-assets/agda-language-server-${VERSION}.tar.gz"
-        for dir in artifacts/als-dev-*/; do
-          dirname="$(basename "$dir")"
-          mapfile -t FILES < <(find "$dir" -maxdepth 1 -type f)
-          [[ "${#FILES[@]}" -eq 1 ]] || { echo "::error::expected exactly one file in artifact ${dirname}, found ${#FILES[@]}"; exit 1; }
-          src="${FILES[0]}"
-          ext="${src##*.}"
-          renamed="als-v${VERSION}-${dirname#als-dev-}.${ext}"
-          cp "$src" "release-assets/${renamed}"
-        done
-        cd release-assets
-        sha256sum -- * > SHA256SUMS
-        cat SHA256SUMS
+          # Only an explicit 404 means the tag is absent; every other lookup
+          # failure (auth, rate limit, network, 5xx) must stop before
+          # mutation, not be conflated with absence.
+          if TAG_REF_JSON=$(gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" 2>tag-ref-err.txt); then
+            REMOTE_TAG_SHA=$(echo "$TAG_REF_JSON" | jq -r '.object.sha')
+          elif grep -q "HTTP 404" tag-ref-err.txt; then
+            REMOTE_TAG_SHA=""
+          else
+            echo "::error::failed to look up tag ${TAG}: $(cat tag-ref-err.txt)"
+            exit 1
+          fi
+          echo "REMOTE_TAG_SHA=${REMOTE_TAG_SHA}" >> "$GITHUB_ENV"
 
-    # DRAFT_MATCHING means Hackage already has this run's exact content:
-    # the commit point has already passed on some earlier attempt, so
-    # assets are only ever verified here, never repaired or replaced.
-    - name: 🔍 Verify draft assets match exactly (DRAFT_MATCHING, no mutation)
-      if: env.ALREADY_PUBLISHED != 'true' && env.STATE == 'DRAFT_MATCHING'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
-        REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
-        LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
-        [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]] || { echo "::error::conflict: draft ${TAG} for this SHA has already committed to Hackage but its asset set no longer matches expected -- refusing to repair a post-commit draft"; exit 1; }
-        cd release-assets
-        for f in *; do
-          EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
-          EXPECTED_SIZE=$(stat -c%s "$f")
-          ASSET=$(echo "$REL" | jq -c --arg n "$f" '.assets[] | select(.name == $n)')
-          ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
-          ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
-          [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" && "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || { echo "::error::conflict: draft ${TAG} asset $f no longer matches after Hackage commit -- refusing to repair"; exit 1; }
-        done
-        echo "Draft already matches this run's content post-commit; proceeding straight to Finalize."
+          if [[ -s release.json && "$(cat release.json)" != "null" ]]; then
+            RELEASE_ID=$(jq -r '.id' release.json)
+            RELEASE_DRAFT=$(jq -r '.draft' release.json)
+            RELEASE_SHA=$(jq -r '.target_commitish' release.json)
+          else
+            RELEASE_ID=""
+            RELEASE_DRAFT=""
+            RELEASE_SHA=""
+          fi
+          {
+            echo "RELEASE_ID=${RELEASE_ID}"
+            echo "RELEASE_DRAFT=${RELEASE_DRAFT}"
+            echo "RELEASE_SHA=${RELEASE_SHA}"
+          } >> "$GITHUB_ENV"
+      - name: "\U0001F50D Inspect — check Hackage for this version"
+        run: |
+          HACKAGE_URL="https://hackage.haskell.org/package/agda-language-server-${VERSION}/agda-language-server-${VERSION}.tar.gz"
+          HTTP_CODE=$(curl -sL -o hackage-tarball.tar.gz -w '%{http_code}' "$HACKAGE_URL" || echo "000")
+          if [[ "$HTTP_CODE" == "200" ]]; then
+            HACKAGE_DIGEST=$(sha256sum hackage-tarball.tar.gz | cut -d' ' -f1)
+          elif [[ "$HTTP_CODE" == "404" ]]; then
+            HACKAGE_DIGEST=""
+            rm -f hackage-tarball.tar.gz
+          else
+            echo "::error::unexpected Hackage response ${HTTP_CODE} while checking ${HACKAGE_URL}"
+            exit 1
+          fi
+          echo "HACKAGE_HTTP_CODE=${HTTP_CODE}"   >> "$GITHUB_ENV"
+          echo "HACKAGE_DIGEST=${HACKAGE_DIGEST}" >> "$GITHUB_ENV"
+          echo "Hackage: HTTP ${HTTP_CODE}, digest ${HACKAGE_DIGEST:-<none>}"
+      - name: "\U0001F50D Inspect — classify state, reject conflicts before any mutation"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          conflict() { echo "::error::conflict: $1"; exit 1; }
 
-    # ABSENT/DRAFT_ABSENT: still pre-Hackage, so it's safe to reconcile.
-    # Either the existing draft's asset set already matches exactly
-    # (accepted as-is), or the whole same-SHA draft is deleted and
-    # recreated fresh -- never an incremental per-asset patch.
-    #
-    # Uses RELEASE_FINALIZE_TOKEN, not the default GITHUB_TOKEN: GitHub
-    # requires 'workflow' scope to create a release whose target commit's
-    # tree differs from the default branch under .github/workflows/* --
-    # confirmed for real (see the Finalize step's comment below for the
-    # test and its result). A SHA-pinned draft can easily hit this once
-    # master has moved on. The default token can never carry that scope.
-    - name: 🏗 Stage — create, or accept/recreate a same-SHA draft
-      if: env.ALREADY_PUBLISHED != 'true' && (env.STATE == 'ABSENT' || env.STATE == 'DRAFT_ABSENT')
-      env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_FINALIZE_TOKEN }}
-      run: |
-        NEEDS_FRESH_DRAFT=true
-        if [[ "$STATE" == "DRAFT_ABSENT" ]]; then
+          if [[ -z "$RELEASE_ID" ]]; then
+            # No release for this tag. An orphan tag, or Hackage already
+            # having this version with nothing to show for it on GitHub,
+            # are both conflicts -- not "absent".
+            [[ -z "$REMOTE_TAG_SHA" ]] || conflict "tag ${TAG} exists with no matching release (points at ${REMOTE_TAG_SHA})"
+            [[ "$HACKAGE_HTTP_CODE" != "200" ]] || conflict "Hackage already has ${VERSION} but no GitHub release exists for ${TAG}"
+            echo "STATE=ABSENT" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          if [[ "$RELEASE_DRAFT" == "false" ]]; then
+            # Published release for this tag: tag must resolve to its own
+            # recorded SHA, and its assets must verify exactly -- a
+            # published release is never auto-repaired, only accepted or
+            # rejected as a conflict.
+            [[ "$REMOTE_TAG_SHA" == "$RELEASE_SHA" ]] || conflict "tag ${TAG} resolves to ${REMOTE_TAG_SHA}, but release ${TAG} records ${RELEASE_SHA}"
+            [[ "$HACKAGE_HTTP_CODE" == "200" ]] || conflict "release ${TAG} is published but Hackage has no ${VERSION} tarball"
+
+            SUMS_ASSET=$(jq -c '.assets[] | select(.name == "SHA256SUMS")' release.json)
+            [[ -n "$SUMS_ASSET" ]] || conflict "release ${TAG} is published but has no SHA256SUMS asset"
+            SUMS_URL=$(echo "$SUMS_ASSET" | jq -r '.browser_download_url')
+            SUMS_EXPECTED_DIGEST=$(echo "$SUMS_ASSET" | jq -r '.digest // empty' | sed 's/^sha256://')
+            curl -sL -o SHA256SUMS "$SUMS_URL"
+            SUMS_ACTUAL_DIGEST=$(sha256sum SHA256SUMS | cut -d' ' -f1)
+            [[ -n "$SUMS_EXPECTED_DIGEST" && "$SUMS_ACTUAL_DIGEST" == "$SUMS_EXPECTED_DIGEST" ]] \
+              || conflict "downloaded SHA256SUMS digest ${SUMS_ACTUAL_DIGEST} != GitHub-reported ${SUMS_EXPECTED_DIGEST:-<none>}"
+
+            MANIFEST_COUNT=$(grep -c . SHA256SUMS || true)
+            [[ "$MANIFEST_COUNT" -gt 0 ]] || conflict "SHA256SUMS for ${TAG} is empty"
+
+            REMOTE_ASSET_NAMES=$(jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' release.json | sort)
+            MANIFEST_NAMES=$(awk '{print $2}' SHA256SUMS | sort)
+            [[ "$REMOTE_ASSET_NAMES" == "$MANIFEST_NAMES" ]] || conflict "release ${TAG} asset set doesn't match its own SHA256SUMS manifest exactly"
+
+            # Self-consistency (checked above) isn't completeness: a release
+            # whose binaries and their manifest entries were both removed
+            # together would still pass that check. Require the exact same
+            # deterministic 15-binary-plus-sdist matrix enforced on the
+            # fresh-draft path, not just internal agreement.
+            EXPECTED_RELEASE_ASSETS=$(printf '%s\n' \
+              "als-v${VERSION}-Agda-2.8.0-ubuntu.zip"   "als-v${VERSION}-Agda-2.8.0-macos-arm64.zip"   "als-v${VERSION}-Agda-2.8.0-macos-x64.zip"   "als-v${VERSION}-Agda-2.8.0-windows.zip" \
+              "als-v${VERSION}-Agda-2.7.0.1-ubuntu.zip" "als-v${VERSION}-Agda-2.7.0.1-macos-arm64.zip" "als-v${VERSION}-Agda-2.7.0.1-macos-x64.zip" "als-v${VERSION}-Agda-2.7.0.1-windows.zip" \
+              "als-v${VERSION}-Agda-2.6.4.3-ubuntu.zip" "als-v${VERSION}-Agda-2.6.4.3-macos-arm64.zip" "als-v${VERSION}-Agda-2.6.4.3-macos-x64.zip" "als-v${VERSION}-Agda-2.6.4.3-windows.zip" \
+              "als-v${VERSION}-Agda-2.8.0-wasm.wasm" "als-v${VERSION}-Agda-2.7.0.1-wasm.wasm" "als-v${VERSION}-Agda-2.6.4.3-wasm.wasm" \
+              "agda-language-server-${VERSION}.tar.gz" | sort)
+            [[ "$MANIFEST_NAMES" == "$EXPECTED_RELEASE_ASSETS" ]] || conflict "release ${TAG}'s asset set doesn't match the expected 15-binary-plus-sdist matrix"
+
+            EXPECTED_SDIST_NAME="agda-language-server-${VERSION}.tar.gz"
+            SDIST_ENTRIES=$(echo "$MANIFEST_NAMES" | grep -Fxc "$EXPECTED_SDIST_NAME" || true)
+            [[ "$SDIST_ENTRIES" -eq 1 ]] || conflict "SHA256SUMS for ${TAG} doesn't have exactly one entry named ${EXPECTED_SDIST_NAME} (found ${SDIST_ENTRIES})"
+
+            MISMATCH=false
+            while read -r digest name; do
+              [[ -z "$name" ]] && continue
+              ASSET=$(jq -c --arg n "$name" '.assets[] | select(.name == $n)' release.json)
+              ASSET_DIGEST=$(echo "$ASSET" | jq -r '.digest // empty' | sed 's/^sha256://')
+              ASSET_SIZE=$(echo "$ASSET" | jq -r '.size // empty')
+              [[ "$ASSET_DIGEST" == "$digest" ]] || MISMATCH=true
+              if [[ "$name" == "$EXPECTED_SDIST_NAME" ]]; then
+                [[ "$digest" == "$HACKAGE_DIGEST" ]] || MISMATCH=true
+              fi
+              [[ -n "$ASSET_SIZE" ]] || MISMATCH=true
+            done < SHA256SUMS
+            [[ "$MISMATCH" == "false" ]] || conflict "release ${TAG} assets don't all verify against SHA256SUMS/Hackage"
+
+            echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
+            echo "Already published and verified: ${TAG}"
+            exit 0
+          fi
+
+          # Draft. Never touch a draft that isn't pinned to this exact run,
+          # and the version tag itself must not already exist -- a draft
+          # never creates the actual tag ref until it's published, so a
+          # non-empty tag alongside a draft means something else (a stale
+          # published-then-deleted release, a manually pushed tag) already
+          # claims this version.
+          [[ "$RELEASE_SHA" == "${{ github.sha }}" ]] || conflict "draft ${TAG} exists for a different SHA (${RELEASE_SHA} != ${{ github.sha }}); refusing to touch it"
+          [[ -z "$REMOTE_TAG_SHA" ]] || conflict "tag ${TAG} already exists (points at ${REMOTE_TAG_SHA}) while an unpublished draft for this SHA is also present"
+          echo "STATE=DRAFT_FOR_SHA" >> "$GITHUB_ENV"
+      - name: "\U0001F4E5 Download this run's release artifacts"
+        if: env.ALREADY_PUBLISHED != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: als-dev-*
+          path: artifacts
+      - name: "\U0001F4E5 Download this run's Hackage sdist"
+        if: env.ALREADY_PUBLISHED != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: hackage-sdist
+          path: artifacts/hackage-sdist
+      - name: "\U0001F50D Confirm all expected build artifacts are present"
+        if: env.ALREADY_PUBLISHED != 'true'
+        run: |
+          EXPECTED=(
+            als-dev-Agda-2.8.0-ubuntu   als-dev-Agda-2.8.0-macos-arm64   als-dev-Agda-2.8.0-macos-x64   als-dev-Agda-2.8.0-windows
+            als-dev-Agda-2.7.0.1-ubuntu als-dev-Agda-2.7.0.1-macos-arm64 als-dev-Agda-2.7.0.1-macos-x64 als-dev-Agda-2.7.0.1-windows
+            als-dev-Agda-2.6.4.3-ubuntu als-dev-Agda-2.6.4.3-macos-arm64 als-dev-Agda-2.6.4.3-macos-x64 als-dev-Agda-2.6.4.3-windows
+            als-dev-Agda-2.8.0-wasm als-dev-Agda-2.7.0.1-wasm als-dev-Agda-2.6.4.3-wasm
+          )
+          EXPECTED_SORTED=$(printf '%s\n' "${EXPECTED[@]}" | sort)
+          # Restricted to 'als-dev-*': 'artifacts/hackage-sdist' (downloaded
+          # separately, checked in the next step) lives alongside these at
+          # the same depth and must not be counted as a sixteenth artifact.
+          ACTUAL_SORTED=$(find artifacts -mindepth 1 -maxdepth 1 -type d -name 'als-dev-*' -printf '%f\n' | sort)
+          if [[ "$EXPECTED_SORTED" != "$ACTUAL_SORTED" ]]; then
+            echo "::error::downloaded artifact set doesn't match the expected 15-artifact build matrix"
+            diff <(echo "$EXPECTED_SORTED") <(echo "$ACTUAL_SORTED") || true
+            exit 1
+          fi
+          echo "All ${#EXPECTED[@]} expected build artifacts present."
+      - name: "\U0001F50D Confirm sdist, compute digests, refine DRAFT_FOR_SHA"
+        if: env.ALREADY_PUBLISHED != 'true'
+        run: |
+          mapfile -t SDISTS < <(find artifacts/hackage-sdist -name '*.tar.gz')
+          [[ "${#SDISTS[@]}" -eq 1 ]] || { echo "::error::expected exactly one sdist in hackage-sdist artifact, found ${#SDISTS[@]}"; exit 1; }
+          SDIST="${SDISTS[0]}"
+          BASENAME=$(basename "$SDIST")
+          if [[ "$BASENAME" != "agda-language-server-${VERSION}.tar.gz" ]]; then
+            echo "::error::sdist ${BASENAME} does not embed expected version ${VERSION}"
+            exit 1
+          fi
+          echo "SDIST_PATH=${SDIST}" >> "$GITHUB_ENV"
+          SDIST_DIGEST=$(sha256sum "$SDIST" | cut -d' ' -f1)
+          echo "SDIST_DIGEST=${SDIST_DIGEST}" >> "$GITHUB_ENV"
+
+          # Only now, with this run's own sdist digest known, can
+          # Draft-for-this-SHA be refined against Hackage: comparing this
+          # run's content against Hackage is only meaningful because this
+          # run is the one that would be responsible for that content.
+          if [[ "$STATE" == "DRAFT_FOR_SHA" ]]; then
+            if [[ "$HACKAGE_HTTP_CODE" == "200" ]]; then
+              if [[ "$HACKAGE_DIGEST" == "$SDIST_DIGEST" ]]; then
+                echo "STATE=DRAFT_MATCHING" >> "$GITHUB_ENV"
+              else
+                echo "::error::conflict: Hackage already has ${VERSION} with a tarball that doesn't match this run's sdist"
+                exit 1
+              fi
+            else
+              echo "STATE=DRAFT_ABSENT" >> "$GITHUB_ENV"
+            fi
+          fi
+      - name: "\U0001F3D7 Stage — rename assets and generate manifest"
+        if: env.ALREADY_PUBLISHED != 'true'
+        run: |
+          mkdir -p release-assets
+          cp "$SDIST_PATH" "release-assets/agda-language-server-${VERSION}.tar.gz"
+          for dir in artifacts/als-dev-*/; do
+            dirname="$(basename "$dir")"
+            mapfile -t FILES < <(find "$dir" -maxdepth 1 -type f)
+            [[ "${#FILES[@]}" -eq 1 ]] || { echo "::error::expected exactly one file in artifact ${dirname}, found ${#FILES[@]}"; exit 1; }
+            src="${FILES[0]}"
+            ext="${src##*.}"
+            renamed="als-v${VERSION}-${dirname#als-dev-}.${ext}"
+            cp "$src" "release-assets/${renamed}"
+          done
+          cd release-assets
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: "\U0001F50D Verify draft assets match exactly (DRAFT_MATCHING, no mutation)"
+        if: env.ALREADY_PUBLISHED != 'true' && env.STATE == 'DRAFT_MATCHING'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
           REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
           LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
-          if [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]]; then
-            MISMATCH=false
-            for f in release-assets/*; do
-              name=$(basename "$f")
-              EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
-              EXPECTED_SIZE=$(stat -c%s "$f")
-              ASSET=$(echo "$REL" | jq -c --arg n "$name" '.assets[] | select(.name == $n)')
-              ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
-              ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
-              [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" && "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || MISMATCH=true
-            done
-            if [[ "$MISMATCH" == "false" ]]; then
-              echo "Existing draft ${TAG} for this SHA already matches exactly; accepting as-is."
-              NEEDS_FRESH_DRAFT=false
+          [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]] || { echo "::error::conflict: draft ${TAG} for this SHA has already committed to Hackage but its asset set no longer matches expected -- refusing to repair a post-commit draft"; exit 1; }
+          cd release-assets
+          for f in *; do
+            EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
+            EXPECTED_SIZE=$(stat -c%s "$f")
+            ASSET=$(echo "$REL" | jq -c --arg n "$f" '.assets[] | select(.name == $n)')
+            ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
+            ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
+            [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" && "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || { echo "::error::conflict: draft ${TAG} asset $f no longer matches after Hackage commit -- refusing to repair"; exit 1; }
+          done
+          echo "Draft already matches this run's content post-commit; proceeding straight to Finalize."
+      - name: "\U0001F3D7 Stage — create, or accept/recreate a same-SHA draft"
+        if: env.ALREADY_PUBLISHED != 'true' && (env.STATE == 'ABSENT' || env.STATE == 'DRAFT_ABSENT')
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_FINALIZE_TOKEN }}
+        run: |
+          NEEDS_FRESH_DRAFT=true
+          if [[ "$STATE" == "DRAFT_ABSENT" ]]; then
+            REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
+            REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
+            LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+            if [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]]; then
+              MISMATCH=false
+              for f in release-assets/*; do
+                name=$(basename "$f")
+                EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
+                EXPECTED_SIZE=$(stat -c%s "$f")
+                ASSET=$(echo "$REL" | jq -c --arg n "$name" '.assets[] | select(.name == $n)')
+                ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
+                ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
+                [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" && "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || MISMATCH=true
+              done
+              if [[ "$MISMATCH" == "false" ]]; then
+                echo "Existing draft ${TAG} for this SHA already matches exactly; accepting as-is."
+                NEEDS_FRESH_DRAFT=false
+              fi
+            fi
+            if [[ "$NEEDS_FRESH_DRAFT" == "true" ]]; then
+              echo "Existing draft ${TAG} for this SHA doesn't match exactly; deleting and recreating (safe pre-Hackage)."
+              # Addressed by the already-verified release ID, not the tag,
+              # so this can never race onto a differently created release
+              # that happens to share the tag name.
+              gh api -X DELETE "repos/${{ github.repository }}/releases/${RELEASE_ID}"
             fi
           fi
-          if [[ "$NEEDS_FRESH_DRAFT" == "true" ]]; then
-            echo "Existing draft ${TAG} for this SHA doesn't match exactly; deleting and recreating (safe pre-Hackage)."
-            # Addressed by the already-verified release ID, not the tag,
-            # so this can never race onto a differently created release
-            # that happens to share the tag name.
-            gh api -X DELETE "repos/${{ github.repository }}/releases/${RELEASE_ID}"
-          fi
-        fi
 
-        if [[ "$NEEDS_FRESH_DRAFT" == "true" ]]; then
-          # Created and uploaded to via the raw REST API, capturing and
-          # reusing the returned release ID throughout -- never
-          # tag-addressed. 'gh release create'/'upload <tag>' both
-          # re-resolve the tag internally, leaving a window (between
-          # create and upload, or between upload and the next step's
-          # lookup) where a replacement release sharing this tag could
-          # silently receive the upload instead of the one just created.
-          CREATED=$(gh api "repos/${{ github.repository }}/releases" -X POST \
-            -f tag_name="$TAG" -f target_commitish="${{ github.sha }}" -f name="$TAG" \
-            -F draft=true -F generate_release_notes=true)
-          RELEASE_ID=$(echo "$CREATED" | jq -r '.id')
-          UPLOAD_URL=$(echo "$CREATED" | jq -r '.upload_url' | sed 's/{?name,label}//')
-          echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
+          if [[ "$NEEDS_FRESH_DRAFT" == "true" ]]; then
+            # Created and uploaded to via the raw REST API, capturing and
+            # reusing the returned release ID throughout -- never
+            # tag-addressed. 'gh release create'/'upload <tag>' both
+            # re-resolve the tag internally, leaving a window (between
+            # create and upload, or between upload and the next step's
+            # lookup) where a replacement release sharing this tag could
+            # silently receive the upload instead of the one just created.
+            CREATED=$(gh api "repos/${{ github.repository }}/releases" -X POST \
+              -f tag_name="$TAG" -f target_commitish="${{ github.sha }}" -f name="$TAG" \
+              -F draft=true -F generate_release_notes=true)
+            RELEASE_ID=$(echo "$CREATED" | jq -r '.id')
+            UPLOAD_URL=$(echo "$CREATED" | jq -r '.upload_url' | sed 's/{?name,label}//')
+            echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
+
+            cd release-assets
+            for f in *; do
+              curl -sL -f -X POST \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@${f}" \
+                "${UPLOAD_URL}?name=${f}" -o /dev/null
+              echo "uploaded ${f} to release ${RELEASE_ID}"
+            done
+          fi
+      - name: "\U0001F50D Verify staged draft — target, exact asset set, digests"
+        if: env.ALREADY_PUBLISHED != 'true' && (env.STATE == 'ABSENT' || env.STATE == 'DRAFT_ABSENT')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
+
+          TARGET=$(echo "$REL" | jq -r '.target_commitish')
+          [[ "$TARGET" == "${{ github.sha }}" ]] || { echo "::error::draft target ${TARGET} != ${{ github.sha }}"; exit 1; }
+
+          REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
+          LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]] || { echo "::error::staged draft asset set doesn't exactly match expected"; exit 1; }
+
+          cd release-assets
+          COUNT=0
+          for f in *; do
+            EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
+            EXPECTED_SIZE=$(stat -c%s "$f")
+            ASSET=$(echo "$REL" | jq -c --arg n "$f" '.assets[] | select(.name == $n)')
+            ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
+            ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
+            [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" ]] || { echo "::error::asset $f digest mismatch: expected $EXPECTED_DIGEST, got $ACTUAL_DIGEST"; exit 1; }
+            [[ "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || { echo "::error::asset $f size mismatch: expected $EXPECTED_SIZE, got $ACTUAL_SIZE"; exit 1; }
+            COUNT=$((COUNT + 1))
+          done
+          echo "Draft verified: correct target and ${COUNT} assets with matching digests and sizes."
+          echo "STAGE_VERIFIED=true" >> "$GITHUB_ENV"
+      - name: "\U0001F680 Publish to Hackage (check-first, guarded)"
+        if: env.ALREADY_PUBLISHED != 'true' && env.STATE != 'DRAFT_MATCHING' && github.repository == 'agda/agda-language-server'
+        env:
+          HACKAGE_API_KEY: ${{ secrets.HACKAGE_API_KEY }}
+        run: |
+          set +e
+          HTTP_CODE=$(curl -sL -o /tmp/current-hackage.tar.gz -w '%{http_code}' \
+            "https://hackage.haskell.org/package/agda-language-server-${VERSION}/agda-language-server-${VERSION}.tar.gz")
+          if [[ "$HTTP_CODE" == "200" ]]; then
+            CURRENT_DIGEST=$(sha256sum /tmp/current-hackage.tar.gz | cut -d' ' -f1)
+            if [[ "$CURRENT_DIGEST" == "$SDIST_DIGEST" ]]; then
+              echo "Hackage already has the matching tarball for ${VERSION}; nothing to upload."
+              exit 0
+            fi
+            echo "::error::Hackage has a ${VERSION} tarball that doesn't match this run's sdist; refusing to upload"
+            exit 1
+          elif [[ "$HTTP_CODE" != "404" ]]; then
+            echo "::error::unexpected Hackage response ${HTTP_CODE}; refusing to upload"
+            exit 1
+          fi
+
+          # Exit status intentionally ignored: the next step (marked
+          # 'always()') is the real success signal, verifying via Hackage's
+          # own digest rather than trusting this call's own exit code.
+          cabal upload --publish --token="${HACKAGE_API_KEY}" "$SDIST_PATH"
+          exit 0
+      - name: "\U0001F50D Verify Hackage publish (runs even if upload failed)"
+        if: env.ALREADY_PUBLISHED != 'true' && env.STATE != 'DRAFT_MATCHING' && env.STAGE_VERIFIED == 'true' && always()
+        run: |
+          HACKAGE_PUBLISHED=false
+          for _ in $(seq 1 10); do
+            # A transport failure (DNS, connection, TLS) makes curl itself
+            # exit nonzero, which would otherwise kill this step outright
+            # under Actions' 'bash -e' -- fall back to a sentinel so it's
+            # retried like any other non-200 response instead.
+            HTTP_CODE=$(curl -sL -o /tmp/verify-hackage.tar.gz -w '%{http_code}' \
+              "https://hackage.haskell.org/package/agda-language-server-${VERSION}/agda-language-server-${VERSION}.tar.gz" || echo "000")
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              ACTUAL_DIGEST=$(sha256sum /tmp/verify-hackage.tar.gz | cut -d' ' -f1)
+              if [[ "$ACTUAL_DIGEST" == "$SDIST_DIGEST" ]]; then
+                HACKAGE_PUBLISHED=true
+                break
+              fi
+            fi
+            sleep 30
+          done
+          if [[ "$HACKAGE_PUBLISHED" != "true" ]]; then
+            echo "::error::could not verify the Hackage tarball for ${VERSION} after upload"
+            exit 1
+          fi
+          echo "HACKAGE_VERIFIED=true" >> "$GITHUB_ENV"
+      - name: "\U0001F3C1 Finalize — publish the draft release"
+        if: env.ALREADY_PUBLISHED != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_FINALIZE_TOKEN }}
+        run: |
+          REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
+          TARGET=$(echo "$REL" | jq -r '.target_commitish')
+          [[ "$TARGET" == "${{ github.sha }}" ]] || { echo "::error::final target check failed: ${TARGET} != ${{ github.sha }}"; exit 1; }
+
+          REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
+          LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]] || { echo "::error::final asset-set check failed"; exit 1; }
 
           cd release-assets
           for f in *; do
-            curl -sL -f -X POST \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary "@${f}" \
-              "${UPLOAD_URL}?name=${f}" -o /dev/null
-            echo "uploaded ${f} to release ${RELEASE_ID}"
+            EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
+            EXPECTED_SIZE=$(stat -c%s "$f")
+            ASSET=$(echo "$REL" | jq -c --arg n "$f" '.assets[] | select(.name == $n)')
+            ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
+            ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
+            [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" ]] || { echo "::error::final asset check failed for $f (digest)"; exit 1; }
+            [[ "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || { echo "::error::final asset check failed for $f (size)"; exit 1; }
           done
-        fi
+          cd ..
 
-    # RELEASE_ID is already correct here -- either propagated by the
-    # previous step's fresh 'gh api POST' response, or (when that step
-    # accepted an existing draft as-is) unchanged from Inspect. No tag
-    # lookup needed.
-    - name: 🔍 Verify staged draft — target, exact asset set, digests
-      if: env.ALREADY_PUBLISHED != 'true' && (env.STATE == 'ABSENT' || env.STATE == 'DRAFT_ABSENT')
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
+          gh api -X PATCH "repos/${{ github.repository }}/releases/${RELEASE_ID}" -F draft=false >/dev/null
 
-        TARGET=$(echo "$REL" | jq -r '.target_commitish')
-        [[ "$TARGET" == "${{ github.sha }}" ]] || { echo "::error::draft target ${TARGET} != ${{ github.sha }}"; exit 1; }
+          RESOLVED=$(gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" --jq '.object.sha')
+          [[ "$RESOLVED" == "${{ github.sha }}" ]] || { echo "::error::tag ${TAG} resolves to ${RESOLVED}, not ${{ github.sha }}"; exit 1; }
 
-        REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
-        LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
-        [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]] || { echo "::error::staged draft asset set doesn't exactly match expected"; exit 1; }
+          PUBLISHED=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}" --jq '.draft == false')
+          [[ "$PUBLISHED" == "true" ]] || { echo "::error::release ${TAG} did not end up published"; exit 1; }
 
-        cd release-assets
-        COUNT=0
-        for f in *; do
-          EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
-          EXPECTED_SIZE=$(stat -c%s "$f")
-          ASSET=$(echo "$REL" | jq -c --arg n "$f" '.assets[] | select(.name == $n)')
-          ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
-          ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
-          [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" ]] || { echo "::error::asset $f digest mismatch: expected $EXPECTED_DIGEST, got $ACTUAL_DIGEST"; exit 1; }
-          [[ "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || { echo "::error::asset $f size mismatch: expected $EXPECTED_SIZE, got $ACTUAL_SIZE"; exit 1; }
-          COUNT=$((COUNT + 1))
-        done
-        echo "Draft verified: correct target and ${COUNT} assets with matching digests and sizes."
-        echo "STAGE_VERIFIED=true" >> "$GITHUB_ENV"
-
-    # Publish Hackage: the commit point. Not reached for DRAFT_MATCHING
-    # (already committed on an earlier attempt). Check-first so a rerun
-    # repeats the same flow with no separate branches for upload errors
-    # or duplicate-version responses; upload and verification live across
-    # steps joined by 'if: always()' so a failed upload's exit code never
-    # silently skips the poll-and-verify that observes the real outcome.
-    - name: 🚀 Publish to Hackage (check-first, guarded)
-      if: env.ALREADY_PUBLISHED != 'true' && env.STATE != 'DRAFT_MATCHING' && github.repository == 'agda/agda-language-server'
-      env:
-        HACKAGE_API_KEY: ${{ secrets.HACKAGE_API_KEY }}
-      run: |
-        set +e
-        HTTP_CODE=$(curl -sL -o /tmp/current-hackage.tar.gz -w '%{http_code}' \
-          "https://hackage.haskell.org/package/agda-language-server-${VERSION}/agda-language-server-${VERSION}.tar.gz")
-        if [[ "$HTTP_CODE" == "200" ]]; then
-          CURRENT_DIGEST=$(sha256sum /tmp/current-hackage.tar.gz | cut -d' ' -f1)
-          if [[ "$CURRENT_DIGEST" == "$SDIST_DIGEST" ]]; then
-            echo "Hackage already has the matching tarball for ${VERSION}; nothing to upload."
-            exit 0
-          fi
-          echo "::error::Hackage has a ${VERSION} tarball that doesn't match this run's sdist; refusing to upload"
-          exit 1
-        elif [[ "$HTTP_CODE" != "404" ]]; then
-          echo "::error::unexpected Hackage response ${HTTP_CODE}; refusing to upload"
-          exit 1
-        fi
-
-        # Exit status intentionally ignored: the next step (marked
-        # 'always()') is the real success signal, verifying via Hackage's
-        # own digest rather than trusting this call's own exit code.
-        cabal upload --publish --token="${HACKAGE_API_KEY}" "$SDIST_PATH"
-        exit 0
-
-    # No repository guard here (unlike the actual upload step above): this
-    # step only reads the public Hackage endpoint, so it must stay
-    # reachable on a fork with the job-level gate widened for testing --
-    # that's what lets a fork run observe "staged, then correctly failed
-    # here because the guarded upload step never ran", the scenario the
-    # plan's fork-testing section exercises.
-    #
-    # env.STAGE_VERIFIED == 'true' is required, not just the two negative
-    # checks below: those are also (falsely) satisfied when ALREADY_PUBLISHED
-    # and STATE are simply unset, e.g. because Inspect rejected a conflict
-    # before Stage ever ran. Without a positive marker that staging actually
-    # completed, 'always()' makes this step run after *any* earlier failure,
-    # not just an upload failure, and report a misleading "could not verify
-    # after upload" when no upload was ever attempted.
-    - name: 🔍 Verify Hackage publish (runs even if upload failed)
-      if: env.ALREADY_PUBLISHED != 'true' && env.STATE != 'DRAFT_MATCHING' && env.STAGE_VERIFIED == 'true' && always()
-      run: |
-        HACKAGE_PUBLISHED=false
-        for _ in $(seq 1 10); do
-          # A transport failure (DNS, connection, TLS) makes curl itself
-          # exit nonzero, which would otherwise kill this step outright
-          # under Actions' 'bash -e' -- fall back to a sentinel so it's
-          # retried like any other non-200 response instead.
-          HTTP_CODE=$(curl -sL -o /tmp/verify-hackage.tar.gz -w '%{http_code}' \
-            "https://hackage.haskell.org/package/agda-language-server-${VERSION}/agda-language-server-${VERSION}.tar.gz" || echo "000")
-          if [[ "$HTTP_CODE" == "200" ]]; then
-            ACTUAL_DIGEST=$(sha256sum /tmp/verify-hackage.tar.gz | cut -d' ' -f1)
-            if [[ "$ACTUAL_DIGEST" == "$SDIST_DIGEST" ]]; then
-              HACKAGE_PUBLISHED=true
-              break
-            fi
-          fi
-          sleep 30
-        done
-        if [[ "$HACKAGE_PUBLISHED" != "true" ]]; then
-          echo "::error::could not verify the Hackage tarball for ${VERSION} after upload"
-          exit 1
-        fi
-        echo "HACKAGE_VERIFIED=true" >> "$GITHUB_ENV"
-
-    # Finalize: addressed by release ID throughout -- including the
-    # publish mutation itself, via the raw API rather than a tag-addressed
-    # 'gh release edit', so this can never race onto a release that
-    # replaced the one already verified above. Re-verify, then publish.
-    # Only reached once Hackage is confirmed (or was already
-    # DRAFT_MATCHING), so a draft is never repaired/replaced past this
-    # point. No repository guard: by the time this step could run, either
-    # ALREADY_PUBLISHED short-circuited, DRAFT_MATCHING already verified
-    # a prior real commit, or the guarded upload step above already
-    # prevented Hackage verification from succeeding on a fork -- this
-    # step performing a GitHub-only mutation adds no additional risk.
-    #
-    # Uses RELEASE_FINALIZE_TOKEN, not the default GITHUB_TOKEN. GitHub
-    # requires 'workflow' scope to CREATE a release whose target commit
-    # modifies .github/workflows/* relative to the default branch --
-    # confirmed for real (fork test against commit 27ae5031: default
-    # token failed Create with 403, RELEASE_FINALIZE_TOKEN succeeded).
-    # That same test found the restriction does NOT reapply to a
-    # subsequent Finalize PATCH on a release already created at that
-    # commit -- the default token successfully un-drafted it. So this
-    # token is kept here defensively (harmless, keeps both mutating
-    # steps consistent), not because Finalize itself was shown to need
-    # it -- only Create was. Untested: whether that holds after a longer
-    # gap where master has advanced further between Create and Finalize.
-    - name: 🏁 Finalize — publish the draft release
-      if: env.ALREADY_PUBLISHED != 'true'
-      env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_FINALIZE_TOKEN }}
-      run: |
-        REL=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}")
-        TARGET=$(echo "$REL" | jq -r '.target_commitish')
-        [[ "$TARGET" == "${{ github.sha }}" ]] || { echo "::error::final target check failed: ${TARGET} != ${{ github.sha }}"; exit 1; }
-
-        REMOTE_NAMES=$(echo "$REL" | jq -r '.assets[] | select(.name != "SHA256SUMS") | .name' | sort)
-        LOCAL_NAMES=$(cd release-assets && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
-        [[ "$REMOTE_NAMES" == "$LOCAL_NAMES" ]] || { echo "::error::final asset-set check failed"; exit 1; }
-
-        cd release-assets
-        for f in *; do
-          EXPECTED_DIGEST=$(sha256sum "$f" | cut -d' ' -f1)
-          EXPECTED_SIZE=$(stat -c%s "$f")
-          ASSET=$(echo "$REL" | jq -c --arg n "$f" '.assets[] | select(.name == $n)')
-          ACTUAL_DIGEST=$(echo "$ASSET" | jq -r '.digest' | sed 's/^sha256://')
-          ACTUAL_SIZE=$(echo "$ASSET" | jq -r '.size')
-          [[ "$ACTUAL_DIGEST" == "$EXPECTED_DIGEST" ]] || { echo "::error::final asset check failed for $f (digest)"; exit 1; }
-          [[ "$ACTUAL_SIZE" == "$EXPECTED_SIZE" ]] || { echo "::error::final asset check failed for $f (size)"; exit 1; }
-        done
-        cd ..
-
-        gh api -X PATCH "repos/${{ github.repository }}/releases/${RELEASE_ID}" -F draft=false >/dev/null
-
-        RESOLVED=$(gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" --jq '.object.sha')
-        [[ "$RESOLVED" == "${{ github.sha }}" ]] || { echo "::error::tag ${TAG} resolves to ${RESOLVED}, not ${{ github.sha }}"; exit 1; }
-
-        PUBLISHED=$(gh api "repos/${{ github.repository }}/releases/${RELEASE_ID}" --jq '.draft == false')
-        [[ "$PUBLISHED" == "true" ]] || { echo "::error::release ${TAG} did not end up published"; exit 1; }
-
-        echo "Release ${TAG} published at ${{ github.sha }}."
+          echo "Release ${TAG} published at ${{ github.sha }}."
