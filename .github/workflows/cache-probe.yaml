@@ -16,7 +16,7 @@ env:
 jobs:
   native-producer:
     name: Native cold producer
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[wasm-only]')
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[wasm-only]') && !contains(github.event.head_commit.message, '[toolchain-only]')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -365,7 +365,7 @@ jobs:
       ALEX_VERSION: 3.5.0.0
       HAPPY_VERSION: 1.20.1.1
     name: WASM cold producer and plan comparison
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[toolchain-only]')
     steps:
       - uses: actions/checkout@v4
         with:
@@ -600,7 +600,7 @@ jobs:
       HAPPY_VERSION: 1.20.1.1
     name: WASM warm consumer
     needs: wasm-producer
-    if: always() && !cancelled() && (needs.wasm-producer.result == 'success' || needs.wasm-producer.result == 'skipped')
+    if: always() && !cancelled() && (needs.wasm-producer.result == 'success' || github.event_name == 'pull_request')
     steps:
       - uses: actions/checkout@v4
         with:
@@ -789,3 +789,102 @@ jobs:
           cd ../..
           # Build all dependencies (cabal git deps + network submodule)
           wasm32-wasi-cabal build --dependencies-only
+  native-toolchain-check:
+    name: Immediate Linux permission regression
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        agda:
+          - Agda-2.8.0
+        os:
+          - ubuntu-latest
+    steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+      - name: "\U0001F4E4 Install yq (Windows)"
+        if: runner.os == 'Windows'
+        uses: frenck/action-setup-yq@v1
+        with:
+          version: v4.53.6
+      - name: "\U0001F39B️ Determine which version of Agda to target"
+        run: |
+          STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)
+          STACK_YAML_ARG="--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)"
+
+          # Determine artifact naming based on branch/tag
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+
+          if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
+
+          echo STACK_YAML_ARG="${STACK_YAML_ARG}" >> "${GITHUB_ENV}"
+          echo STACK_YAML="${STACK_YAML}"         >> "${GITHUB_ENV}"
+          echo ARTEFACT="${ARTEFACT}"             >> "${GITHUB_ENV}"
+      - name: "\U0001F39B️ Determine Stack resolver & GHC version"
+        run: |
+          STACK_RESOLVER=$(yq .resolver $STACK_YAML)
+          GHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)
+          echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
+          echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
+      - name: Restore without ownership fix (negative control)
+        id: legacy-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /usr/local/.ghcup
+          key: probe-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+      - name: Confirm legacy restore fails
+        env:
+          HIT: ${{ steps.legacy-restore.outputs.cache-hit }}
+        run: test "$HIT" != true
+      - name: Make Linux GHCup cache writable
+        run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+      - name: "\U0001F4BE Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)"
+        id: haskell-toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: probe-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+      - name: Assert repaired toolchain hit
+        env:
+          HIT: ${{ steps.haskell-toolchain.outputs.cache-hit }}
+        run: test "$HIT" = true
+      - name: "\U0001F3D7 Setup Haskell (pinned Stack version, all platforms)"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F50D Verify pinned Stack version"
+        run: |
+          actual="$(stack --numeric-version)"
+          echo "Stack version: ${actual}"
+          if [[ "${actual}" != "${STACK_VERSION}" ]]; then
+            echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F50D Verify pinned GHC version"
+        run: |
+          actual="$(ghc --numeric-version)"
+          echo "GHC version: ${actual}"
+          if [[ "${actual}" != "${GHC_VERSION}" ]]; then
+            echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
+            exit 1
+          fi
