@@ -171,8 +171,9 @@ jobs:
     #    pinned STACK_VERSION and GHC_VERSION (no Agda target -- shared
     #    across the three Agda entries for this OS/architecture). It is
     #    restored before Haskell setup so a hit lets setup skip
-    #    downloading GHC and Stack, verified against the pinned versions
-    #    afterward, and saved by the Agda 2.8.0 entry immediately after
+    #    downloading GHC. Setup installs Stack separately in the runner
+    #    tool cache. Both pinned versions are verified afterward, and the
+    #    GHCup cache is saved by the Agda 2.8.0 entry immediately after
     #    that verification -- independently of the snapshot/dependency
     #    builds below, so a setup or version-mismatch failure blocks the
     #    save but a later dependency-build failure cannot suppress it.
