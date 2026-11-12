@@ -1,3 +1,4 @@
+# Default-branch cron registration control; publishing remains omitted.
 name: Cache matrix experiment
 defaults:
   run:
