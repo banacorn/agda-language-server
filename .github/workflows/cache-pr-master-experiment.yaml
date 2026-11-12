@@ -1,217 +1,220 @@
-{
-  "name": "PR master cache lifecycle experiment",
-  "on": {
-    "pull_request": {
-      "branches": [
-        "master"
-      ],
-      "paths": [
-        ".github/cache-lifecycle/**"
-      ]
-    },
-    "workflow_dispatch": {
-      "inputs": {
-        "source-ref": {
-          "description": "Reviewed fork revision whose dependency manifest is built; empty uses workflow ref",
-          "type": "string",
-          "default": ""
-        },
-        "save": {
-          "description": "Save cache in this workflow run scope",
-          "type": "boolean",
-          "default": false
-        },
-        "expected-hit": {
-          "description": "Assert exact hit or miss",
-          "type": "choice",
-          "options": [
-            "any",
-            "true",
-            "false"
-          ],
-          "default": "any"
-        }
-      }
-    }
-  },
-  "permissions": {
-    "contents": "read"
-  },
-  "defaults": {
-    "run": {
-      "shell": "bash",
-      "working-directory": "als"
-    }
-  },
-  "env": {
-    "STACK_VERSION": "3.3.1"
-  },
-  "jobs": {
-    "native": {
-      "name": "Native PR/master cache lifecycle",
-      "runs-on": "${{ matrix.os }}",
-      "strategy": {
-        "matrix": {
-          "os": [
-            "ubuntu-24.04"
-          ],
-          "agda": [
-            "Agda-2.8.0"
-          ]
-        }
-      },
-      "steps": [
-        {
-          "name": "Checkout dependency revision",
-          "uses": "actions/checkout@v4",
-          "with": {
-            "ref": "${{ inputs.source-ref || github.sha }}",
-            "path": "control",
-            "persist-credentials": false
-          }
-        },
-        {
-          "name": "Checkout verified build source",
-          "uses": "actions/checkout@v4",
-          "with": {
-            "ref": "818ec174c7a2ded86137089b39ae28521a7af6a9",
-            "path": "als",
-            "persist-credentials": false
-          }
-        },
-        {
-          "name": "Use dependency manifest from tested revision",
-          "run": "cp ../control/.github/cache-lifecycle/package.yaml package.yaml\necho \"Dependency revision: $(git -C ../control rev-parse HEAD)\"\nsha256sum package.yaml"
-        },
-        {
-          "name": "📤 Install yq (Windows)",
-          "if": "runner.os == 'Windows'",
-          "uses": "frenck/action-setup-yq@v1",
-          "with": {
-            "version": "v4.53.6"
-          }
-        },
-        {
-          "name": "🎛️ Determine which version of Agda to target",
-          "run": "STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)\nSTACK_YAML_ARG=\"--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)\"\n\n# Determine artifact naming based on branch/tag\nif [[ \"${{ github.ref }}\" == \"refs/heads/master\" ]]; then\n  PREFIX=\"als-dev\"\nelif [[ \"${{ github.ref }}\" == refs/tags/v* ]]; then\n  PREFIX=\"als-${{ github.ref_name }}\"\nelse\n  PREFIX=\"als\"\nfi\n\nif [[ ${{ matrix.os }} == \"ubuntu-24.04\" ]]; then\n  ARTEFACT=\"$PREFIX-${{ matrix.agda }}-ubuntu\"\nfi\nif [[ ${{ matrix.os }} == \"macos-15\" ]]; then\n  ARTEFACT=\"$PREFIX-${{ matrix.agda }}-macos-arm64\"\nfi\nif [[ ${{ matrix.os }} == \"macos-15-intel\" ]]; then\n  ARTEFACT=\"$PREFIX-${{ matrix.agda }}-macos-x64\"\nfi\nif [[ ${{ matrix.os }} == \"windows-latest\" ]]; then\n  ARTEFACT=\"$PREFIX-${{ matrix.agda }}-windows\"\nfi\n\necho STACK_YAML_ARG=\"${STACK_YAML_ARG}\" >> \"${GITHUB_ENV}\"\necho STACK_YAML=\"${STACK_YAML}\"         >> \"${GITHUB_ENV}\"\necho ARTEFACT=\"${ARTEFACT}\"             >> \"${GITHUB_ENV}\"\n"
-        },
-        {
-          "name": "🎛️ Determine Stack resolver & GHC version",
-          "run": "STACK_RESOLVER=$(yq .resolver $STACK_YAML)\nGHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)\necho STACK_RESOLVER=\"${STACK_RESOLVER}\" >> \"${GITHUB_ENV}\"\necho GHC_VERSION=\"${GHC_VERSION}\"       >> \"${GITHUB_ENV}\"\n"
-        },
-        {
-          "name": "Prepare Linux toolchain cache permissions",
-          "if": "runner.os == 'Linux'",
-          "run": "sudo chown -R \"$(id -u):$(id -g)\" /usr/local/.ghcup"
-        },
-        {
-          "name": "💾 Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)",
-          "id": "haskell-toolchain",
-          "uses": "actions/cache/restore@v4",
-          "with": {
-            "path": "${{ runner.os == 'Windows' && 'C:\\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}",
-            "key": "matrix-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}"
-          }
-        },
-        {
-          "name": "🏗 Setup Haskell (pinned Stack version, all platforms)",
-          "uses": "haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d",
-          "with": {
-            "ghc-version": "${{ env.GHC_VERSION }}",
-            "enable-stack": true,
-            "stack-version": "${{ env.STACK_VERSION }}"
-          }
-        },
-        {
-          "name": "🔍 Verify pinned Stack version",
-          "run": "actual=\"$(stack --numeric-version)\"\necho \"Stack version: ${actual}\"\nif [[ \"${actual}\" != \"${STACK_VERSION}\" ]]; then\n  echo \"::error::expected pinned Stack ${STACK_VERSION}, got ${actual}\"\n  exit 1\nfi\n"
-        },
-        {
-          "name": "🔍 Verify pinned GHC version",
-          "run": "actual=\"$(ghc --numeric-version)\"\necho \"GHC version: ${actual}\"\nif [[ \"${actual}\" != \"${GHC_VERSION}\" ]]; then\n  echo \"::error::expected pinned GHC ${GHC_VERSION}, got ${actual}\"\n  exit 1\nfi\n"
-        },
-        {
-          "name": "🎛️ Determine Stack root",
-          "run": "STACK_ROOT=\"$(stack path $STACK_YAML_ARG --stack-root)\"\necho STACK_ROOT=\"${STACK_ROOT}\"         >> \"${GITHUB_ENV}\"\n"
-        },
-        {
-          "name": "⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)",
-          "if": "runner.os == 'macOS'",
-          "run": "echo PKG_CONFIG_PATH=\"$(brew --prefix)/opt/icu4c/lib/pkgconfig\" >> \"${GITHUB_ENV}\"\n"
-        },
-        {
-          "name": "📥 Install the icu library (on Windows)",
-          "if": "runner.os == 'Windows'",
-          "run": "# -Sy refreshes the package database first: the GH Windows runner\n# image ships a bundled MSYS2 db snapshot that can reference\n# package versions mirrors have since pruned, causing \"failed\n# retrieving file ... 404\" across every configured mirror despite\n# the requested packages being entirely unversioned here.\n#\n# mingw64, not clang64: with system-ghc: true, Cabal's configure\n# step (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs\n# pointing at Stack's bundled msys2/mingw64 tree regardless of\n# which MSYS2 subsystem we install into, so the packages actually\n# used by the linker must live under mingw64, not clang64.\nstack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm\nstack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf\n"
-        },
-        {
-          "name": "🛣️ Add MSYS2 mingw64 bin to PATH (on Windows)",
-          "if": "runner.os == 'Windows'",
-          "run": "stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\\n' | grep -i 'bin$' | sed 's/^ *//' >> \"${GITHUB_PATH}\"\n"
-        },
-        {
-          "name": "🎛️ Resolve ICU version",
-          "env": {
-            "RUNNER_OS": "${{ runner.os }}"
-          },
-          "run": "bash .github/scripts/resolve-icu-version.sh"
-        },
-        {
-          "name": "🎛️ Compute compiled-dependency CONFIG_HASH",
-          "run": "DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has(\"dependencies\")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)\necho CONFIG_HASH=\"${{ hashFiles('als/stack-9.10.2-Agda-2.8.0.yaml', 'als/stack-9.10.2-Agda-2.8.0.yaml.lock', 'als/.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}\" >> \"$GITHUB_ENV\""
-        },
-        {
-          "name": "🔍 Review all variables",
-          "run": "echo \"STACK_YAML      = ${STACK_YAML}\"\necho \"STACK_YAML_ARG  = ${STACK_YAML_ARG}\"\necho \"STACK_RESOLVER  = ${STACK_RESOLVER}\"\necho \"ARTEFACT        = ${ARTEFACT}\"\necho \"GHC_VERSION     = ${GHC_VERSION}\"\necho \"STACK_VERSION   = ${STACK_VERSION}\"\necho \"ICU_VERSION     = ${ICU_VERSION}\"\necho \"STACK_ROOT      = ${STACK_ROOT}\"\necho \"CONFIG_HASH     = ${CONFIG_HASH}\"\n"
-        },
-        {
-          "name": "💾 Restore compiled-dependency cache",
-          "id": "stack-snapshot",
-          "uses": "actions/cache/restore@v4",
-          "with": {
-            "path": "${{ env.STACK_ROOT }}/snapshots\n${{ env.STACK_ROOT }}/setup-exe-cache\n",
-            "key": "lifecycle-stack-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}",
-            "restore-keys": "matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-897353945e9264f3ea0ffd776926c5ba6654ce1845765ea73ccb8bfc0ade16b9-886d69788f72de625b7ff6fce946542c35006b299627f92edef44e4a710278fb-baseline"
-          }
-        },
-        {
-          "name": "Record and assert restoration",
-          "env": {
-            "HIT": "${{ steps.stack-snapshot.outputs.cache-hit }}",
-            "MATCHED": "${{ steps.stack-snapshot.outputs.cache-matched-key }}",
-            "PRIMARY": "${{ steps.stack-snapshot.outputs.cache-primary-key }}",
-            "EXPECTED": "${{ inputs.expected-hit || 'any' }}",
-            "EVENT": "${{ github.event_name }}",
-            "SCOPE": "${{ github.ref }}"
-          },
-          "run": "printf \"event=%s\\nscope=%s\\nprimary=%s\\nmatched=%s\\nhit=%s\\n\" \"$EVENT\" \"$SCOPE\" \"$PRIMARY\" \"$MATCHED\" \"$HIT\" | tee -a \"$GITHUB_STEP_SUMMARY\"\nif [[ \"$EXPECTED\" != any ]]; then test \"$HIT\" = \"$EXPECTED\"; fi"
-        },
-        {
-          "name": "📸 Build Snapshot",
-          "run": "stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1"
-        },
-        {
-          "name": "🏗️ Build Dependencies",
-          "id": "build-deps",
-          "run": "stack build $STACK_YAML_ARG --no-terminal --only-dependencies"
-        },
-        {
-          "name": "🏗️ Build Testings",
-          "id": "build-test-deps",
-          "run": "stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies"
-        },
-        {
-          "name": "💾 Save compiled-dependency cache",
-          "if": "(github.event_name == 'pull_request' || inputs.save) && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true'",
-          "uses": "actions/cache/save@v4",
-          "with": {
-            "path": "${{ env.STACK_ROOT }}/snapshots\n${{ env.STACK_ROOT }}/setup-exe-cache\n",
-            "key": "${{ steps.stack-snapshot.outputs.cache-primary-key }}"
-          }
-        }
-      ],
-      "timeout-minutes": 60,
-      "if": "github.event_name != 'schedule'"
-    }
-  }
-}
+name: PR master cache lifecycle experiment
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/cache-lifecycle/**
+  workflow_dispatch:
+    inputs:
+      source-ref:
+        description: Reviewed fork revision whose dependency manifest is built; empty uses workflow ref
+        type: string
+        default: ""
+      save:
+        description: Save cache in this workflow run scope
+        type: boolean
+        default: false
+      expected-hit:
+        description: Assert exact hit or miss
+        type: choice
+        options:
+          - any
+          - "true"
+          - "false"
+        default: any
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+    working-directory: als
+env:
+  STACK_VERSION: 3.3.1
+jobs:
+  native:
+    name: Native PR/master cache lifecycle
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+        agda:
+          - Agda-2.8.0
+    steps:
+      - name: Checkout dependency revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Checkout verified build source
+        uses: actions/checkout@v4
+        with:
+          ref: 818ec174c7a2ded86137089b39ae28521a7af6a9
+          path: als
+          persist-credentials: false
+      - name: Use dependency manifest from tested revision
+        run: |-
+          cp ../control/.github/cache-lifecycle/package.yaml package.yaml
+          echo "Dependency revision: $(git -C ../control rev-parse HEAD)"
+          sha256sum package.yaml
+      - name: "\U0001F4E4 Install yq (Windows)"
+        if: runner.os == 'Windows'
+        uses: frenck/action-setup-yq@v1
+        with:
+          version: v4.53.6
+      - name: "\U0001F39B️ Determine which version of Agda to target"
+        run: |
+          STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)
+          STACK_YAML_ARG="--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)"
+
+          # Determine artifact naming based on branch/tag
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
+
+          echo STACK_YAML_ARG="${STACK_YAML_ARG}" >> "${GITHUB_ENV}"
+          echo STACK_YAML="${STACK_YAML}"         >> "${GITHUB_ENV}"
+          echo ARTEFACT="${ARTEFACT}"             >> "${GITHUB_ENV}"
+      - name: "\U0001F39B️ Determine Stack resolver & GHC version"
+        run: |
+          STACK_RESOLVER=$(yq .resolver $STACK_YAML)
+          GHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)
+          echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
+          echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
+      - name: Prepare Linux toolchain cache permissions
+        if: runner.os == 'Linux'
+        run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+      - name: "\U0001F4BE Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)"
+        id: haskell-toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: matrix-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+      - name: "\U0001F3D7 Setup Haskell (pinned Stack version, all platforms)"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F50D Verify pinned Stack version"
+        run: |
+          actual="$(stack --numeric-version)"
+          echo "Stack version: ${actual}"
+          if [[ "${actual}" != "${STACK_VERSION}" ]]; then
+            echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F50D Verify pinned GHC version"
+        run: |
+          actual="$(ghc --numeric-version)"
+          echo "GHC version: ${actual}"
+          if [[ "${actual}" != "${GHC_VERSION}" ]]; then
+            echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F39B️ Determine Stack root"
+        run: |
+          STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
+          echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
+      - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo PKG_CONFIG_PATH="$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "${GITHUB_ENV}"
+      - name: "\U0001F4E5 Install the icu library (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          # -Sy refreshes the package database first: the GH Windows runner
+          # image ships a bundled MSYS2 db snapshot that can reference
+          # package versions mirrors have since pruned, causing "failed
+          # retrieving file ... 404" across every configured mirror despite
+          # the requested packages being entirely unversioned here.
+          #
+          # mingw64, not clang64: with system-ghc: true, Cabal's configure
+          # step (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs
+          # pointing at Stack's bundled msys2/mingw64 tree regardless of
+          # which MSYS2 subsystem we install into, so the packages actually
+          # used by the linker must live under mingw64, not clang64.
+          stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
+          stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
+      - name: "\U0001F6E3️ Add MSYS2 mingw64 bin to PATH (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
+      - name: "\U0001F39B️ Resolve ICU version"
+        env:
+          RUNNER_OS: ${{ runner.os }}
+        run: bash .github/scripts/resolve-icu-version.sh
+      - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
+        run: |-
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
+          echo CONFIG_HASH="${{ hashFiles('als/stack-9.10.2-Agda-2.8.0.yaml', 'als/stack-9.10.2-Agda-2.8.0.yaml.lock', 'als/.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
+      - name: "\U0001F50D Review all variables"
+        run: |
+          echo "STACK_YAML      = ${STACK_YAML}"
+          echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
+          echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
+          echo "ARTEFACT        = ${ARTEFACT}"
+          echo "GHC_VERSION     = ${GHC_VERSION}"
+          echo "STACK_VERSION   = ${STACK_VERSION}"
+          echo "ICU_VERSION     = ${ICU_VERSION}"
+          echo "STACK_ROOT      = ${STACK_ROOT}"
+          echo "CONFIG_HASH     = ${CONFIG_HASH}"
+      - name: "\U0001F4BE Restore compiled-dependency cache"
+        id: stack-snapshot
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: lifecycle-stack-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+          restore-keys: |-
+            lifecycle-stack-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
+            matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-897353945e9264f3ea0ffd776926c5ba6654ce1845765ea73ccb8bfc0ade16b9-886d69788f72de625b7ff6fce946542c35006b299627f92edef44e4a710278fb-baseline
+      - name: Record and assert restoration
+        env:
+          HIT: ${{ steps.stack-snapshot.outputs.cache-hit }}
+          MATCHED: ${{ steps.stack-snapshot.outputs.cache-matched-key }}
+          PRIMARY: ${{ steps.stack-snapshot.outputs.cache-primary-key }}
+          EXPECTED: ${{ inputs.expected-hit || 'any' }}
+          EVENT: ${{ github.event_name }}
+          SCOPE: ${{ github.ref }}
+        run: |-
+          printf "event=%s\nscope=%s\nprimary=%s\nmatched=%s\nhit=%s\n" "$EVENT" "$SCOPE" "$PRIMARY" "$MATCHED" "$HIT" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [[ "$EXPECTED" != any ]]; then test "$HIT" = "$EXPECTED"; fi
+      - name: "\U0001F4F8 Build Snapshot"
+        run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
+      - name: "\U0001F3D7️ Build Dependencies"
+        id: build-deps
+        run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
+      - name: "\U0001F3D7️ Build Testings"
+        id: build-test-deps
+        run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
+      - name: "\U0001F4BE Save compiled-dependency cache"
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch' && inputs.save && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: ${{ steps.stack-snapshot.outputs.cache-primary-key }}
+    timeout-minutes: 60
+    if: github.event_name != 'schedule'
