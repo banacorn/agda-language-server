@@ -88,7 +88,8 @@ jobs:
         # MacOSX.sdk, which there is SDK 27, whose .tbd stubs no installed
         # ld can read ("unknown architecture arm64e.x1"). macos-15 also keeps
         # the release's minimum macOS where it was.
-        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
+        # Pin Ubuntu so consecutive jobs use the same release and ICU ABI.
+        os: [windows-latest, ubuntu-24.04, macos-15, macos-15-intel]
         agda: ['Agda-2.8.0', 'Agda-2.7.0.1', 'Agda-2.6.4.3']
         # macos-15-intel (Intel Mac) runners are scarce and can sit queued
         # for 13+ minutes before starting, dominating PR feedback latency
@@ -131,7 +132,7 @@ jobs:
           PREFIX="als"
         fi
 
-        if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+        if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
           ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
         fi
         if [[ ${{ matrix.os }} == "macos-15" ]]; then
@@ -161,8 +162,9 @@ jobs:
     #    pinned STACK_VERSION and GHC_VERSION (no Agda target -- shared
     #    across the three Agda entries for this OS/architecture). It is
     #    restored before Haskell setup so a hit lets setup skip
-    #    downloading GHC and Stack, verified against the pinned versions
-    #    afterward, and saved by the Agda 2.8.0 entry immediately after
+    #    downloading GHC. Setup installs Stack separately in the runner
+    #    tool cache. Both pinned versions are verified afterward, and the
+    #    GHCup cache is saved by the Agda 2.8.0 entry immediately after
     #    that verification -- independently of the snapshot/dependency
     #    builds below, so a setup or version-mismatch failure blocks the
     #    save but a later dependency-build failure cannot suppress it.
@@ -187,6 +189,12 @@ jobs:
     # runners (pre-provisioned by the runner image); actions/cache archives
     # the symlink itself, not its target, so Linux must cache the real path
     # directly. macOS and Windows have no such indirection.
+    # Parts of this tree belong to root on the runner image. Take ownership
+    # before extraction so tar can restore directory modes and timestamps.
+    - name: Prepare Linux toolchain cache permissions
+      if: runner.os == 'Linux'
+      run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+
     - name: 💾 Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)
       id: haskell-toolchain
       uses: actions/cache/restore@v4
@@ -556,7 +564,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
+        os: [windows-latest, ubuntu-24.04, macos-15, macos-15-intel]
         agda: ['Agda-2.8.0', 'Agda-2.7.0.1', 'Agda-2.6.4.3']
         # Must mirror build-and-test's matrix and PR exclusions, and the
         # artifact-name computation below must mirror its "Determine
@@ -590,7 +598,7 @@ jobs:
           PREFIX="als"
         fi
 
-        if [[ ${{ matrix.os }} == "ubuntu-latest" ]]; then
+        if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
           ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
         fi
         if [[ ${{ matrix.os }} == "macos-15" ]]; then
