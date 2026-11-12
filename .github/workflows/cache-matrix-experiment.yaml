@@ -18,6 +18,13 @@ on:
           - baseline
           - next
         default: baseline
+      native-target:
+        description: all runs the full experiment; intel-2.6 retries only the slow Intel cache producer
+        type: choice
+        options:
+          - all
+          - intel-2.6
+        default: all
   schedule:
     - cron: 7,22,37,52 * * * *
 concurrency:
@@ -75,15 +82,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os:
-          - windows-latest
-          - ubuntu-24.04
-          - macos-15
-          - macos-15-intel
-        agda:
-          - Agda-2.8.0
-          - Agda-2.7.0.1
-          - Agda-2.6.4.3
+        os: ${{ fromJSON(inputs.native-target == 'intel-2.6' && '["macos-15-intel"]' || '["windows-latest","ubuntu-24.04","macos-15","macos-15-intel"]') }}
+        agda: ${{ fromJSON(inputs.native-target == 'intel-2.6' && '["Agda-2.6.4.3"]' || '["Agda-2.8.0","Agda-2.7.0.1","Agda-2.6.4.3"]') }}
         exclude:
           - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
             agda: Agda-2.7.0.1
@@ -461,12 +461,12 @@ jobs:
             echo "- Dependencies exact hit: $DEPENDENCY_HIT"
             echo "- Matched dependency key: $MATCHED_KEY"
           } | tee -a "$GITHUB_STEP_SUMMARY"
-    timeout-minutes: 90
+    timeout-minutes: 150
     if: github.event_name != 'schedule'
   verify-native-artifact:
     name: Verify Native Artifact
     needs: build-and-test
-    if: github.event_name != 'schedule' && (!cancelled() && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only))
+    if: (github.event_name != 'schedule' && (!cancelled() && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only))) && inputs.native-target != 'intel-2.6'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -934,7 +934,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
     timeout-minutes: 90
-    if: github.event_name != 'schedule'
+    if: (github.event_name != 'schedule') && inputs.native-target != 'intel-2.6'
   schedule-observe:
     name: Scheduled native cache refresh
     runs-on: ${{ matrix.os }}
