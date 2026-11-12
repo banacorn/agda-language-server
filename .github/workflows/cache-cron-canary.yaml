@@ -1,3 +1,4 @@
+# Observe whether a normal, non-skipped default-branch commit registers cron.
 name: Temporary cache cron canary
 on:
   schedule:
