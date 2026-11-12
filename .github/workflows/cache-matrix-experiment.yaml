@@ -12,7 +12,7 @@ on:
         type: boolean
         default: true
       generation:
-        description: Controlled native compiled-cache generation
+        description: next adds the small Only dependency to native builds
         type: choice
         options:
           - baseline
@@ -206,6 +206,11 @@ jobs:
         env:
           RUNNER_OS: ${{ runner.os }}
         run: bash .github/scripts/resolve-icu-version.sh
+      - name: Add controlled native dependency in next generation
+        if: inputs.generation == 'next'
+        run: |
+          yq -i '.dependencies += ["Only"]' package.yaml
+          echo 'Added Only-0.1 from lts-24.1 for the cache invalidation experiment.'
       - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
         run: |
           DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
@@ -1060,6 +1065,11 @@ jobs:
           RUNNER_OS: ${{ runner.os }}
         run: bash .github/scripts/resolve-icu-version.sh
         if: steps.haskell-toolchain.outputs.cache-hit == 'true'
+      - name: Add controlled native dependency in next generation
+        if: inputs.generation == 'next'
+        run: |
+          yq -i '.dependencies += ["Only"]' package.yaml
+          echo 'Added Only-0.1 from lts-24.1 for the cache invalidation experiment.'
       - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
         run: |
           DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
