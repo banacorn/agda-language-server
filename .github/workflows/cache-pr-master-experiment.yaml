@@ -1,10 +1,5 @@
 name: PR master cache lifecycle experiment
 on:
-  pull_request:
-    branches:
-      - master
-    paths:
-      - .github/cache-lifecycle/**
   workflow_dispatch:
     inputs:
       source-ref:
