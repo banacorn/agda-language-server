@@ -1,0 +1,19 @@
+name: Temporary cache cron canary
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Record actual trigger
+        run: |
+          {
+            echo "Event: $GITHUB_EVENT_NAME"
+            echo "Ref: $GITHUB_REF"
+            date -u
+          } | tee -a "$GITHUB_STEP_SUMMARY"
