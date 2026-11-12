@@ -1001,6 +1001,7 @@ jobs:
           ghc-version: ${{ env.GHC_VERSION }}
           enable-stack: true
           stack-version: ${{ env.STACK_VERSION }}
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F50D Verify pinned Stack version"
         run: |
           actual="$(stack --numeric-version)"
@@ -1009,6 +1010,7 @@ jobs:
             echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
             exit 1
           fi
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F50D Verify pinned GHC version"
         run: |
           actual="$(ghc --numeric-version)"
@@ -1017,9 +1019,9 @@ jobs:
             echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
             exit 1
           fi
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F4BE Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)"
-        if: |
-          matrix.agda == 'Agda-2.8.0' && github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.haskell-toolchain.outputs.cache-hit != 'true'
+        if: (matrix.agda == 'Agda-2.8.0' && github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.haskell-toolchain.outputs.cache-hit != 'true') && steps.haskell-toolchain.outputs.cache-hit == 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
@@ -1028,12 +1030,13 @@ jobs:
         run: |
           STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
           echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
-        if: runner.os == 'macOS'
+        if: (runner.os == 'macOS') && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: |
           echo PKG_CONFIG_PATH="$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "${GITHUB_ENV}"
       - name: "\U0001F4E5 Install the icu library (on Windows)"
-        if: runner.os == 'Windows'
+        if: (runner.os == 'Windows') && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: |
           # -Sy refreshes the package database first: the GH Windows runner
           # image ships a bundled MSYS2 db snapshot that can reference
@@ -1049,17 +1052,19 @@ jobs:
           stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
           stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
       - name: "\U0001F6E3️ Add MSYS2 mingw64 bin to PATH (on Windows)"
-        if: runner.os == 'Windows'
+        if: (runner.os == 'Windows') && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: |
           stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
       - name: "\U0001F39B️ Resolve ICU version"
         env:
           RUNNER_OS: ${{ runner.os }}
         run: bash .github/scripts/resolve-icu-version.sh
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
         run: |
           DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
           echo CONFIG_HASH="${{ hashFiles(env.STACK_YAML, format('{0}.lock', env.STACK_YAML), '.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}-${{ inputs.generation || 'baseline' }}" >> "${GITHUB_ENV}"
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F50D Review all variables"
         run: |
           echo "STACK_YAML      = ${STACK_YAML}"
@@ -1071,6 +1076,7 @@ jobs:
           echo "ICU_VERSION     = ${ICU_VERSION}"
           echo "STACK_ROOT      = ${STACK_ROOT}"
           echo "CONFIG_HASH     = ${CONFIG_HASH}"
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F4BE Restore compiled-dependency cache"
         id: stack-snapshot
         uses: actions/cache/restore@v4
@@ -1081,20 +1087,20 @@ jobs:
           key: matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
           restore-keys: |
             matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
+        if: steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F4F8 Build Snapshot"
         run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
-        if: steps.stack-snapshot.outputs.cache-matched-key != ''
+        if: (steps.stack-snapshot.outputs.cache-matched-key != '') && steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F3D7️ Build Dependencies"
         id: build-deps
         run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
-        if: steps.stack-snapshot.outputs.cache-matched-key != ''
+        if: (steps.stack-snapshot.outputs.cache-matched-key != '') && steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F3D7️ Build Testings"
         id: build-test-deps
         run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
-        if: steps.stack-snapshot.outputs.cache-matched-key != ''
+        if: (steps.stack-snapshot.outputs.cache-matched-key != '') && steps.haskell-toolchain.outputs.cache-hit == 'true'
       - name: "\U0001F4BE Save compiled-dependency cache"
-        if: |
-          github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true'
+        if: (github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true') && steps.haskell-toolchain.outputs.cache-hit == 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -1102,10 +1108,10 @@ jobs:
             ${{ env.STACK_ROOT }}/setup-exe-cache
           key: matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
       - name: "\U0001F3D7️ Build ALS"
-        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: (github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: stack build $STACK_YAML_ARG
       - name: "\U0001F4E6 Bundle executable, DLLs and data files (on macOS)"
-        if: (runner.os == 'macOS') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: ((runner.os == 'macOS') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: |
 
           # see if icu4c has been installed
@@ -1194,7 +1200,7 @@ jobs:
           echo "    old path  : $icudata_path"
           echo "    new path  : $icudata_path_new"
       - name: "\U0001F4E6 Bundle ICU libraries (on Linux)"
-        if: (runner.os == 'Linux') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: ((runner.os == 'Linux') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: |
           command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y patchelf
 
@@ -1222,7 +1228,7 @@ jobs:
           patchelf --set-rpath '$ORIGIN/lib' "$executable"
           echo "rpath set on $executable: $(patchelf --print-rpath "$executable")"
       - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Linux and macOS)"
-        if: (runner.os != 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: ((runner.os != 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         id: zip
         run: |
           # locate the data-dir
@@ -1250,7 +1256,7 @@ jobs:
           cd ..
           mv zip/$ARTEFACT.zip .
       - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Windows)"
-        if: (runner.os == 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: ((runner.os == 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         shell: pwsh
         run: |
           # locate the data-dir
@@ -1284,10 +1290,10 @@ jobs:
           cd ..
           mv zip/"$($env:ARTEFACT).zip" .
       - name: "\U0001F9EA Run tests"
-        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: (github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         run: stack test $STACK_YAML_ARG
       - name: "\U0001F4E4 Upload native artifact"
-        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        if: (github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)) && steps.haskell-toolchain.outputs.cache-hit == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTEFACT }}
