@@ -1,0 +1,194 @@
+name:                agda-language-server
+version:             9
+github:              "agda/agda-language-server"
+license:             MIT
+author:              "Ting-Gian LUA"
+maintainer:          "banacorn@gmail.com, Andreas Abel"
+copyright:           "2020-23 Ting-Gian LUA, Andreas ABEL"
+
+extra-source-files:
+- README.md
+- CHANGELOG.md
+- package.yaml
+- stack.yaml
+- stack-9.10.2-Agda-2.6.4.3.yaml
+- stack-9.10.2-Agda-2.7.0.1.yaml
+- stack-9.10.2-Agda-2.8.0.yaml
+
+# Metadata used when publishing your package
+synopsis:            An implementation of language server protocal (LSP) for Agda 2.
+category:            Development
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/agda/agda-language-server#readme>
+
+flags:
+  Agda-2-6-4:
+    description: Embed Agda-2.6.4.3
+    manual: true
+    default: false
+  Agda-2-7-0:
+    description: Embed Agda-2.7.0.1
+    manual: true
+    default: false
+  Agda-2-8-0:
+    description: Embed Agda-2.8.0
+    manual: true
+    default: false
+  reactor:
+    description: Build as a WASI reactor module
+    manual: true
+    default: false
+when:
+- condition: "flag(Agda-2-6-4)"
+  dependencies:
+    - Agda == 2.6.4.3
+- condition: "flag(Agda-2-7-0)"
+  dependencies:
+    - Agda == 2.7.0.1
+- condition: "flag(Agda-2-8-0)"
+  dependencies:
+    - Agda == 2.8.0
+- condition: "arch(wasm32)"
+  then:
+    dependencies:
+      - unix >= 2.8.0.0 && < 2.9
+  else:
+    dependencies:
+      - network
+      - network-simple == 0.4.2
+
+dependencies:
+  - base >= 4.7 && < 5
+  - Agda
+  - aeson
+  - bytestring
+  - containers
+  - directory
+  - filepath
+  - lsp-types >= 2
+  - lsp >= 2
+  - mtl
+  - strict
+  - stm
+  - text
+  - process
+  - prettyprinter
+
+default-extensions:
+- LambdaCase
+- OverloadedStrings
+- PatternSynonyms
+- TypeOperators
+
+library:
+  source-dirs: src
+  ghc-options:
+  - -Wincomplete-patterns
+  - -Wunused-do-bind
+  - -Wunused-foralls
+  - -Wwarnings-deprecations
+  - -Wwrong-do-bind
+  - -Wmissing-fields
+  - -Wmissing-methods
+  - -Wmissing-pattern-synonym-signatures
+  - -Wmissing-signatures
+  - -Werror=incomplete-patterns
+  - -fno-warn-orphans
+  when:
+  - condition: "!arch(wasm32)"
+    ghc-options:
+    - -threaded
+
+executables:
+  als:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -Wincomplete-patterns
+    - -Wunused-do-bind
+    - -Wunused-foralls
+    - -Wwarnings-deprecations
+    - -Wwrong-do-bind
+    - -Wmissing-fields
+    - -Wmissing-methods
+    - -Wmissing-pattern-synonym-signatures
+    - -Wmissing-signatures
+    - -rtsopts
+    - -Werror=incomplete-patterns
+    - -fno-warn-orphans
+    when:
+    - condition: "arch(wasm32)"
+      ghc-options: -with-rtsopts=-V1
+    - condition: "flag(reactor)"
+      other-modules:
+      - Reactor
+      dependencies:
+      - ghc-experimental
+      - attoparsec
+      ghc-options:
+      - -no-hs-main
+      - -optl-mexec-model=reactor
+      - -optl-Wl,--export=hs_init,--export=run_setup,--export=new_language_server,--export=free_language_server,--export=run_language_server,--export=send_message,--export=recv_message
+    - condition: "!arch(wasm32)"
+      ghc-options:
+      - -threaded
+      - -with-rtsopts=-N
+    dependencies:
+    - agda-language-server
+
+tests:
+  als-test:
+    main: Test.hs
+    source-dirs:
+      - test
+      - src
+    dependencies:
+      - lsp-test
+      - tasty
+      - tasty-hunit
+      - tasty-golden
+      - tasty-quickcheck
+
+    ghc-options:
+      - -Wincomplete-patterns
+      - -Wunused-do-bind
+      - -Wunused-foralls
+      - -Wwarnings-deprecations
+      - -Wwrong-do-bind
+      - -Wmissing-fields
+      - -Wmissing-methods
+      - -Wmissing-pattern-synonym-signatures
+      - -Wmissing-signatures
+      - -rtsopts
+      - -Werror=incomplete-patterns
+      - -fno-warn-orphans
+    when:
+    - condition: "arch(wasm32)"
+      ghc-options: -with-rtsopts=-V1
+    - condition: "!arch(wasm32)"
+      ghc-options:
+      - -threaded
+      - -with-rtsopts=-N
+
+benchmarks:
+  als-bench:
+    main: Bench.hs
+    source-dirs: bench
+    dependencies:
+      - lsp-test
+    ghc-options:
+      - -threaded
+
+# tests:
+#   als-test:
+#     main:                Spec.hs
+#     source-dirs:         test
+#     ghc-options:
+#     - -threaded
+#     - -rtsopts
+#     - -with-rtsopts=-N
+#     dependencies:
+#     - agda-language-server
