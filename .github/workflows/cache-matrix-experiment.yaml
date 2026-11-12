@@ -1,0 +1,1314 @@
+name: Cache matrix experiment
+defaults:
+  run:
+    shell: bash
+env:
+  STACK_VERSION: 3.3.1
+on:
+  workflow_dispatch:
+    inputs:
+      cache-only:
+        description: Build caches only; false runs ordinary build/test/artifact checks
+        type: boolean
+        default: true
+      generation:
+        description: Controlled native compiled-cache generation
+        type: choice
+        options:
+          - baseline
+          - next
+        default: baseline
+  schedule:
+    - cron: 7,22,37,52 * * * *
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  check-cabal-drift:
+    name: Generate Cabal File & Build Sdist
+    if: github.event_name != 'schedule' && (github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only))
+    runs-on: ubuntu-24.04
+    steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          ref: 818ec174c7a2ded86137089b39ae28521a7af6a9
+      - name: "\U0001F4E5 Install hpack"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/sol/hpack/releases/download/0.38.3/hpack_linux.gz \
+            | gunzip > "$HOME/.local/bin/hpack"
+          chmod +x "$HOME/.local/bin/hpack"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: "\U0001F504 Generate cabal file with hpack"
+        run: hpack
+      - name: "\U0001F3D7 Setup Haskell"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: 9.10.2
+          cabal-version: 3.12.1.0
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F512 Check stack-*.yaml.lock drift (fails if Stack would rewrite it)"
+        run: |
+          for f in stack-9.10.2-Agda-2.8.0.yaml stack-9.10.2-Agda-2.7.0.1.yaml stack-9.10.2-Agda-2.6.4.3.yaml; do
+            echo "::group::${f}.lock"
+            stack build --stack-yaml "$f" --dry-run --lock-file error-on-write
+            echo "::endgroup::"
+          done
+      - name: "\U0001F4E6 Build source distribution"
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: cabal sdist
+      - name: "\U0001F4E4 Upload Hackage sdist"
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hackage-sdist
+          path: dist-newstyle/sdist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+    timeout-minutes: 90
+  build-and-test:
+    name: Build and Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-24.04
+          - macos-15
+          - macos-15-intel
+        agda:
+          - Agda-2.8.0
+          - Agda-2.7.0.1
+          - Agda-2.6.4.3
+        exclude:
+          - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
+            agda: Agda-2.7.0.1
+          - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
+            agda: Agda-2.6.4.3
+      fail-fast: false
+    steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          ref: 818ec174c7a2ded86137089b39ae28521a7af6a9
+      - name: "\U0001F4E4 Install yq (Windows)"
+        if: runner.os == 'Windows'
+        uses: frenck/action-setup-yq@v1
+        with:
+          version: v4.53.6
+      - name: "\U0001F39B️ Determine which version of Agda to target"
+        run: |
+          STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)
+          STACK_YAML_ARG="--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)"
+
+          # Determine artifact naming based on branch/tag
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
+
+          echo STACK_YAML_ARG="${STACK_YAML_ARG}" >> "${GITHUB_ENV}"
+          echo STACK_YAML="${STACK_YAML}"         >> "${GITHUB_ENV}"
+          echo ARTEFACT="${ARTEFACT}"             >> "${GITHUB_ENV}"
+      - name: "\U0001F39B️ Determine Stack resolver & GHC version"
+        run: |
+          STACK_RESOLVER=$(yq .resolver $STACK_YAML)
+          GHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)
+          echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
+          echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
+      - name: Prepare Linux toolchain cache permissions
+        if: runner.os == 'Linux'
+        run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+      - name: "\U0001F4BE Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)"
+        id: haskell-toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: matrix-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+      - name: "\U0001F3D7 Setup Haskell (pinned Stack version, all platforms)"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F50D Verify pinned Stack version"
+        run: |
+          actual="$(stack --numeric-version)"
+          echo "Stack version: ${actual}"
+          if [[ "${actual}" != "${STACK_VERSION}" ]]; then
+            echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F50D Verify pinned GHC version"
+        run: |
+          actual="$(ghc --numeric-version)"
+          echo "GHC version: ${actual}"
+          if [[ "${actual}" != "${GHC_VERSION}" ]]; then
+            echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F4BE Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)"
+        if: |
+          matrix.agda == 'Agda-2.8.0' && github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.haskell-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: ${{ steps.haskell-toolchain.outputs.cache-primary-key }}
+      - name: "\U0001F39B️ Determine Stack root"
+        run: |
+          STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
+          echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
+      - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo PKG_CONFIG_PATH="$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "${GITHUB_ENV}"
+      - name: "\U0001F4E5 Install the icu library (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          # -Sy refreshes the package database first: the GH Windows runner
+          # image ships a bundled MSYS2 db snapshot that can reference
+          # package versions mirrors have since pruned, causing "failed
+          # retrieving file ... 404" across every configured mirror despite
+          # the requested packages being entirely unversioned here.
+          #
+          # mingw64, not clang64: with system-ghc: true, Cabal's configure
+          # step (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs
+          # pointing at Stack's bundled msys2/mingw64 tree regardless of
+          # which MSYS2 subsystem we install into, so the packages actually
+          # used by the linker must live under mingw64, not clang64.
+          stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
+          stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
+      - name: "\U0001F6E3️ Add MSYS2 mingw64 bin to PATH (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
+      - name: "\U0001F39B️ Resolve ICU version"
+        env:
+          RUNNER_OS: ${{ runner.os }}
+        run: bash .github/scripts/resolve-icu-version.sh
+      - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
+        run: |
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
+          echo CONFIG_HASH="${{ hashFiles(env.STACK_YAML, format('{0}.lock', env.STACK_YAML), '.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}-${{ inputs.generation || 'baseline' }}" >> "${GITHUB_ENV}"
+      - name: "\U0001F50D Review all variables"
+        run: |
+          echo "STACK_YAML      = ${STACK_YAML}"
+          echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
+          echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
+          echo "ARTEFACT        = ${ARTEFACT}"
+          echo "GHC_VERSION     = ${GHC_VERSION}"
+          echo "STACK_VERSION   = ${STACK_VERSION}"
+          echo "ICU_VERSION     = ${ICU_VERSION}"
+          echo "STACK_ROOT      = ${STACK_ROOT}"
+          echo "CONFIG_HASH     = ${CONFIG_HASH}"
+      - name: "\U0001F4BE Restore compiled-dependency cache"
+        id: stack-snapshot
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+          restore-keys: |
+            matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
+      - name: "\U0001F4F8 Build Snapshot"
+        run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
+      - name: "\U0001F3D7️ Build Dependencies"
+        id: build-deps
+        run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
+      - name: "\U0001F3D7️ Build Testings"
+        id: build-test-deps
+        run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
+      - name: "\U0001F4BE Save compiled-dependency cache"
+        if: |
+          github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+      - name: "\U0001F3D7️ Build ALS"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: stack build $STACK_YAML_ARG
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on macOS)"
+        if: (runner.os == 'macOS') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: |
+
+          # see if icu4c has been installed
+          if [ "$(brew list | grep icu4c)" = "" ]
+              then
+                  echo "installing icu4c"
+                  brew install icu4c
+          fi
+
+          # get the directory of the DDLs we want (icuuc, icui18n, icudata)
+          dylib_dir=$(dirname "$(brew list icu4c | grep icuuc.dylib)")
+          echo "dylib_dir: $dylib_dir"
+
+          # find the path of "als"
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)"/bin -name "als")
+          echo "executable: $executable"
+
+          # remove the old dylib, and make a new one
+          rm -rf dylib
+          mkdir dylib
+
+          ################################################################################
+          # icuuc
+          ################################################################################
+
+          icuuc_id=$(otool -L "$executable" | grep icuuc | awk '{print $1}')
+          icuuc_id_basename=$(basename "$icuuc_id")
+
+          icuuc_path=$dylib_dir/$icuuc_id_basename
+          icuuc_path_new=dylib/$icuuc_id_basename
+          icuuc_id_new=@loader_path/dylib/$icuuc_id_basename
+
+          # copy icuuc to the new directory
+          cp "$icuuc_path" "$icuuc_path_new"
+
+          # change icuuc's ID referenced by ALS
+          install_name_tool -change "$icuuc_id" "$icuuc_id_new" "$executable"
+
+          echo "icuuc referenced by ALS"
+          echo "    old ID  : $icuuc_id"
+          echo "    new ID  : $icuuc_id_new"
+          echo "    old path: $icuuc_path"
+          echo "    new path: $icuuc_path_new"
+
+          ################################################################################
+          # icui18n
+          ################################################################################
+
+          icui18n_id=$(otool -L "$executable" | grep icui18n | awk '{print $1}')
+          icui18n_id_basename=$(basename "$icui18n_id")
+
+          icui18n_path=$dylib_dir/$icui18n_id_basename
+          icui18n_path_new=dylib/$icui18n_id_basename
+          icui18n_id_new=@loader_path/dylib/$icui18n_id_basename
+
+          # copy icui18n to the new directory
+          cp "$icui18n_path" "$icui18n_path_new"
+
+          # change icui18n's ID referenced by ALS
+          install_name_tool -change "$icui18n_id" "$icui18n_id_new" "$executable"
+
+          echo "icui18n referenced by ALS"
+          echo "    old ID  : $icui18n_id"
+          echo "    new ID  : $icui18n_id_new"
+          echo "    old path: $icui18n_path"
+          echo "    new path: $icui18n_path_new"
+
+          ################################################################################
+          # icudata
+          ################################################################################
+
+          # otool -L "$icui18n_id" | grep icudata | awk '{print $1}'
+          icudata_id=$(otool -L "$icuuc_path" | grep icudata | awk '{print $1}')
+          icudata_id_basename=$(basename "$icudata_id")
+
+          icudata_path=$dylib_dir/$icudata_id_basename
+          icudata_path_new=dylib/$icudata_id_basename
+
+          # copy icudata to the new directory
+          cp "$icudata_path" "$icudata_path_new"
+
+          # no need of changing the ID because supposely it's already of "@loader_path"
+
+          echo "icudata referenced by icuuc"
+          echo "    old ID    : $icudata_id"
+          echo "    old path  : $icudata_path"
+          echo "    new path  : $icudata_path_new"
+      - name: "\U0001F4E6 Bundle ICU libraries (on Linux)"
+        if: (runner.os == 'Linux') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: |
+          command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y patchelf
+
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
+          echo "executable: $executable"
+
+          rm -rf lib
+          mkdir lib
+
+          for name in libicuuc libicui18n libicudata; do
+            entry=$(ldd "$executable" | grep "${name}\.so" || true)
+            if [[ -z "$entry" ]]; then
+              echo "::error::could not find $name in ldd output for $executable"
+              exit 1
+            fi
+            soname=$(echo "$entry" | awk '{print $1}')
+            real_path=$(readlink -f "$(echo "$entry" | awk '{print $3}')")
+            cp "$real_path" "lib/$soname"
+            echo "bundled $soname (from $real_path)"
+          done
+
+          # $ORIGIN is a dynamic-linker token (the directory containing
+          # the executable at run time), not a shell variable -- must
+          # stay unexpanded here.
+          patchelf --set-rpath '$ORIGIN/lib' "$executable"
+          echo "rpath set on $executable: $(patchelf --print-rpath "$executable")"
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Linux and macOS)"
+        if: (runner.os != 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        id: zip
+        run: |
+          # locate the data-dir
+          datadir=$(find "$(stack path $STACK_YAML_ARG --snapshot-install-root)/share" -type d -name "Agda-*")
+          echo "datadir: $datadir"
+
+          # locate the executable
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
+          echo "executable: $executable"
+
+          # make a temporary directory for compresssing
+          mkdir zip
+          cp -r "$datadir" zip/data
+          if [[ ${{ runner.os }} == "macOS" ]]; then
+              cp -r dylib zip/dylib
+          fi
+          if [[ ${{ runner.os }} == "Linux" ]]; then
+              cp -r lib zip/lib
+          fi
+          cp "$executable" zip/
+
+          # compress
+          cd zip
+          zip -r $ARTEFACT.zip ./*
+          cd ..
+          mv zip/$ARTEFACT.zip .
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Windows)"
+        if: (runner.os == 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        shell: pwsh
+        run: |
+          # locate the data-dir
+          $snapshot = (stack path $STACK_YAML_ARG --snapshot-install-root)
+          $datadir = (ls $snapshot\share *Agda-* -Recurse -Directory).FullName
+
+          # locate the executable
+          $local = (stack path $STACK_YAML_ARG --local-install-root)
+          $executable = (ls $local\bin *als.exe* -Recurse -File).FullName
+
+          # make a temporary directory for compresssing
+          mkdir zip
+          cp -r $datadir zip/data
+          cp $executable zip/
+
+          # include text-icu DLLs
+          $mingw64bin = (stack path $STACK_YAML_ARG --extra-library-dirs).split(", ") -match "\\bin"
+          cp (ls $mingw64bin *libicudt*) zip/
+          cp (ls $mingw64bin *libicuin*) zip/
+          cp (ls $mingw64bin *libicuuc*) zip/
+          # ICU imports these MinGW runtimes. Take them from ICU's own
+          # directory, so the bundled copies match the ICU they serve.
+          foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            cp (Join-Path $mingw64bin $runtime) zip/ -ErrorAction Stop
+          }
+          ls zip
+
+          # compress
+          cd zip
+          Compress-Archive * "$($env:ARTEFACT).zip"
+          cd ..
+          mv zip/"$($env:ARTEFACT).zip" .
+      - name: "\U0001F9EA Run tests"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: stack test $STACK_YAML_ARG
+      - name: "\U0001F4E4 Upload native artifact"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTEFACT }}
+          path: ${{ env.ARTEFACT }}.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: Record cache and runner evidence
+        if: always()
+        env:
+          TOOLCHAIN_HIT: ${{ steps.haskell-toolchain.outputs.cache-hit }}
+          DEPENDENCY_HIT: ${{ steps.stack-snapshot.outputs.cache-hit }}
+          MATCHED_KEY: ${{ steps.stack-snapshot.outputs.cache-matched-key }}
+        run: |
+          {
+            echo "### Native cache evidence"
+            echo "- Runner: $RUNNER_OS/$RUNNER_ARCH; image ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- ICU: ${ICU_VERSION:-unknown}"
+            echo "- Toolchain exact hit: $TOOLCHAIN_HIT"
+            echo "- Dependencies exact hit: $DEPENDENCY_HIT"
+            echo "- Matched dependency key: $MATCHED_KEY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+    timeout-minutes: 90
+    if: github.event_name != 'schedule'
+  verify-native-artifact:
+    name: Verify Native Artifact
+    needs: build-and-test
+    if: github.event_name != 'schedule' && (!cancelled() && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only))
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-24.04
+          - macos-15
+          - macos-15-intel
+        agda:
+          - Agda-2.8.0
+          - Agda-2.7.0.1
+          - Agda-2.6.4.3
+        exclude:
+          - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
+            agda: Agda-2.7.0.1
+          - os: ${{ github.event_name == 'pull_request' && 'macos-15-intel' || '' }}
+            agda: Agda-2.6.4.3
+      fail-fast: false
+    steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          ref: 818ec174c7a2ded86137089b39ae28521a7af6a9
+      - name: "\U0001F40D Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "\U0001F39B️ Determine expected artifact name"
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
+
+          echo ARTEFACT="${ARTEFACT}" >> "${GITHUB_ENV}"
+      - name: "\U0001F4E5 Download native artifact"
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTEFACT }}
+          path: download
+      - name: "\U0001F4E6 Extract release archive"
+        run: |
+          mkdir -p release
+          python -m zipfile -e "download/${ARTEFACT}.zip" release/
+
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            # zipfile doesn't preserve the Unix executable bit.
+            chmod +x release/als
+          fi
+      - name: "\U0001F50D Verify archive layout"
+        run: |
+          als="release/als"
+          [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
+
+          [[ -f "$als" ]] || { echo "::error::missing $als in extracted archive"; exit 1; }
+          [[ -d "release/data/lib" ]] || { echo "::error::missing release/data/lib in extracted archive"; exit 1; }
+
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            [[ -d "release/dylib" ]] || { echo "::error::missing release/dylib in extracted archive"; exit 1; }
+          fi
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            [[ -d "release/lib" ]] || { echo "::error::missing release/lib in extracted archive"; exit 1; }
+          fi
+      - name: "\U0001F9EA Check the packaged executable starts (Linux, hidden system ICU)"
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/check-artifact-runs.sh release/als --hide-icu
+      - name: "\U0001F9EA Check the packaged executable resolves ICU from the archive (Linux, system ICU visible)"
+        if: runner.os == 'Linux'
+        run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
+      - name: "\U0001F9EA Check the packaged executable starts (macOS, libraries from the archive or the OS only)"
+        if: runner.os == 'macOS'
+        run: python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only
+      - name: "\U0001F9EA Check removing each bundled ICU library fails startup (Linux, hidden system ICU)"
+        if: runner.os == 'Linux'
+        run: |
+          # Shows the startup checks above would catch any one of these
+          # libraries going missing from the archive.
+          stash="$RUNNER_TEMP/als-icu-control"
+          mkdir -p "$stash"
+          shopt -s nullglob
+          libs=(release/lib/libicu*)
+          [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/lib"; exit 1; }
+          for lib in "${libs[@]}"; do
+            name=$(basename "$lib")
+            mv "$lib" "$stash/$name"
+            failed_to_start=true
+            bash .github/scripts/check-artifact-runs.sh release/als --hide-icu --expect-failure || failed_to_start=false
+            mv "$stash/$name" "$lib"
+            $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
+          done
+      - name: "\U0001F9EA Check removing each bundled ICU library fails startup (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          # Shows the startup check above would catch any one of these
+          # libraries going missing from the archive.
+          stash="$RUNNER_TEMP/als-icu-control"
+          mkdir -p "$stash"
+          shopt -s nullglob
+          libs=(release/dylib/libicu*)
+          [[ ${#libs[@]} -gt 0 ]] || { echo "::error::no bundled ICU libraries in release/dylib"; exit 1; }
+          for lib in "${libs[@]}"; do
+            name=$(basename "$lib")
+            mv "$lib" "$stash/$name"
+            failed_to_start=true
+            python .github/scripts/check-artifact-lsp.py release/als test/data/Unicode.agda --startup-only --expect-missing-library || failed_to_start=false
+            mv "$stash/$name" "$lib"
+            $failed_to_start || { echo "::error::removing $name did not fail startup"; exit 1; }
+          done
+      - name: "\U0001F9EA Check the startup audit catches a dylib loaded from Homebrew (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          cp -R release leak-homebrew
+          ref=$(otool -L leak-homebrew/als | awk '/libicuuc/ {print $1}')
+          name=$(basename "$ref")
+          major=$(echo "$name" | sed -E 's/libicuuc\.([0-9]+)\.dylib/\1/')
+          target="$(brew --prefix "icu4c@$major")/lib/$name"
+          [[ -f "$target" ]] || brew install "icu4c@$major"
+          install_name_tool -change "$ref" "$target" leak-homebrew/als
+          codesign -f -s - leak-homebrew/als
+          # dyld reports the resolved file under Cellar, not the opt/ symlink.
+          leaked=$(python -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$target")
+          echo "LEAKED_DYLIB=$leaked" >> "$GITHUB_ENV"
+
+          if python .github/scripts/check-artifact-lsp.py leak-homebrew/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als that loads $leaked"; exit 1
+          fi
+          cat audit.log
+          grep -F "loaded from outside the archive and the OS: $leaked" audit.log
+      - name: "\U0001F9EA Check the completed-load audit catches a dylib loaded from Homebrew (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          # Same Homebrew-leak copy as above, through a full LSP load.
+          if python .github/scripts/check-artifact-lsp.py leak-homebrew/als test/data/Unicode.agda > audit.log 2>&1; then
+            cat audit.log; echo "::error::the completed-load audit passed an als that loads $LEAKED_DYLIB"; exit 1
+          fi
+          cat audit.log
+          grep -F "loaded from outside the archive and the OS: $LEAKED_DYLIB" audit.log
+      - name: "\U0001F9EA Check the startup audit catches ICU resolved from the system (Linux)"
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -qq patchelf > /dev/null
+
+          # 1. als loses its RUNPATH, so all of ICU resolves from the system.
+          cp -R release leak-no-runpath
+          patchelf --remove-rpath leak-no-runpath/als
+          if python .github/scripts/check-artifact-lsp.py leak-no-runpath/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als without RUNPATH"; exit 1
+          fi
+          cat audit.log
+          grep -E "not resolved from the archive: libicuuc[^ ]* => /" audit.log
+
+          # 2. als keeps its RUNPATH but stops needing libicudata directly, so
+          #    libicudata is found through libicuuc, which has no RUNPATH of its
+          #    own: the system copy wins although the bundled one is there.
+          data=$(readelf -d release/als | sed -nE 's/.*Shared library: \[(libicudata[^]]*)\].*/\1/p')
+          [[ -n "$data" ]] || { echo "::error::als does not need libicudata directly"; exit 1; }
+          cp -R release leak-transitive
+          patchelf --remove-needed "$data" leak-transitive/als
+          if python .github/scripts/check-artifact-lsp.py leak-transitive/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als that finds $data through libicuuc"; exit 1
+          fi
+          cat audit.log
+          grep -F "not resolved from the archive: $data => /" audit.log
+      - name: "\U0001F9EA Check the startup audit catches a non-ICU library from outside the OS (Linux)"
+        if: runner.os == 'Linux'
+        run: |
+          # als finds a copy of libgmp in a directory that is neither the
+          # archive nor the system's, through an extra RUNPATH entry.
+          gmp=$(LD_TRACE_LOADED_OBJECTS=1 release/als | awk '$1 ~ /^libgmp\.so/ {print $1, $3}')
+          [[ -n "$gmp" ]] || { echo "::error::als does not need libgmp"; exit 1; }
+          read -r gmp_name gmp_path <<< "$gmp"
+          stray="$RUNNER_TEMP/stray-libs"
+          mkdir -p "$stray"
+          cp "$gmp_path" "$stray/$gmp_name"
+          cp -R release leak-stray-dir
+          patchelf --set-rpath "\$ORIGIN/lib:$stray" leak-stray-dir/als
+          if python .github/scripts/check-artifact-lsp.py leak-stray-dir/als test/data/Unicode.agda --startup-only > audit.log 2>&1; then
+            cat audit.log; echo "::error::the audit passed an als that loads $stray/$gmp_name"; exit 1
+          fi
+          cat audit.log
+          grep -F "not resolved from the archive: $gmp_name => $stray/$gmp_name" audit.log
+      - name: "\U0001F9EA Check the packaged executable starts (Windows, system-only PATH)"
+        if: runner.os == 'Windows'
+        run: python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only
+      - name: "\U0001F9EA Check removing each bundled runtime DLL fails startup (Windows)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Shows the startup check above would catch any one of these
+          # runtimes going missing from the archive again.
+          $stash = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/als-runtime-control" -Force
+          foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            $source = Join-Path 'release' $runtime
+            $hidden = Join-Path $stash.FullName $runtime
+            Move-Item $source $hidden -ErrorAction Stop
+            try {
+              python .github/scripts/check-artifact-lsp.py release/als.exe test/data/Unicode.agda --startup-only --expect-missing-library
+              if ($LASTEXITCODE -ne 0) { throw "removing $runtime did not fail startup with STATUS_DLL_NOT_FOUND" }
+            } finally {
+              Move-Item $hidden $source
+            }
+          }
+      - name: "\U0001F9EA Check a completed Cmd_load on the packaged executable"
+        run: |
+          als="release/als"
+          [[ "${{ runner.os }}" == "Windows" ]] && als="release/als.exe"
+          python .github/scripts/check-artifact-lsp.py "$als" test/data/Unicode.agda
+    timeout-minutes: 90
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        agda:
+          - name: 2.8.0
+            label: Agda-2.8.0
+            flag: 2-8-0
+            commit: e2f8c69414fa115328280ecc4de1d2b7a23be7fa
+          - name: 2.7.0.1
+            label: Agda-2.7.0.1
+            flag: 2-7-0
+            commit: 702c924fdab93aa8992adca84e72a91c490f7b1b
+          - name: 2.6.4.3
+            label: Agda-2.6.4.3
+            flag: 2-6-4
+            commit: 8f35851954c39dc3849095bfd018bed9bd1b32ad
+      fail-fast: false
+    env:
+      GHC_WASM_META_FLAVOUR: "9.10"
+      GHC_WASM_META_COMMIT_HASH: c3f44696d29aaeadd755d69c51735954bfcd59db
+      ALEX_VERSION: 3.5.0.0
+      HAPPY_VERSION: 1.20.1.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: als
+          submodules: true
+          ref: 818ec174c7a2ded86137089b39ae28521a7af6a9
+      - name: "\U0001F4E5 Install hpack"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/sol/hpack/releases/download/0.38.3/hpack_linux.gz \
+            | gunzip > "$HOME/.local/bin/hpack"
+          chmod +x "$HOME/.local/bin/hpack"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: "\U0001F504 Generate cabal file with hpack"
+        working-directory: als
+        run: hpack
+      - name: Compute cache key
+        run: |
+          echo "CI_CACHE_KEY=${{ runner.os }}-${{ runner.arch }}-${{ env.GHC_WASM_META_COMMIT_HASH }}-flavor-${{ env.GHC_WASM_META_FLAVOUR }}" >> "$GITHUB_ENV"
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+          echo "WASM_ASSET_BASENAME=${PREFIX}-${{ matrix.agda.label }}-wasm" >> "$GITHUB_ENV"
+      - name: Compute WASM toolchain cache key
+        run: |
+          HASH=$(printf '%s' "v1-${GHC_WASM_META_COMMIT_HASH}-${GHC_WASM_META_FLAVOUR}" | sha256sum | cut -d' ' -f1)
+          echo "WASM_TOOLCHAIN_KEY=matrix-ghc-wasm-v3-${{ runner.os }}-${{ runner.arch }}-${HASH}" >> "$GITHUB_ENV"
+      - name: Restore ghc-wasm-meta toolchain cache
+        id: ghc-wasm-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ghc-wasm
+          key: ${{ env.WASM_TOOLCHAIN_KEY }}
+      - name: Clone and setup ghc-wasm-meta
+        id: ghc-wasm-setup
+        if: steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true'
+        run: |
+          mkdir ghc-wasm-meta
+          cd ghc-wasm-meta
+          git config --global init.defaultBranch dontcare
+          git config --global advice.detachedHead false
+          git init
+          git remote add origin https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta.git
+          git fetch origin ${{ env.GHC_WASM_META_COMMIT_HASH }} --depth=1
+          git checkout FETCH_HEAD
+          FLAVOUR=${{ env.GHC_WASM_META_FLAVOUR }} ./setup.sh
+      - name: Add ghc-wasm-meta to PATH
+        run: ~/.ghc-wasm/add_to_github_path.sh
+      - name: Validate ghc-wasm-meta toolchain executables
+        if: steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true'
+        id: validate-wasm-toolchain
+        run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-wasm-toolchain.sh"
+      - name: Cache ghc-wasm-meta (Agda 2.8.0 is the sole writer)
+        if: |
+          matrix.agda.name == '2.8.0' && github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.ghc-wasm-cache-restore.outputs.cache-hit != 'true' && steps.validate-wasm-toolchain.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ghc-wasm
+          key: ${{ env.WASM_TOOLCHAIN_KEY }}
+      - name: Update wasm32 cabal
+        run: wasm32-wasi-cabal update
+      - name: Compute native-utilities cache key
+        run: |
+          GHC_BIN="$(command -v ghc)"
+          GHC_VERSION="$(ghc --numeric-version)"
+          CABAL_VERSION="$(~/.ghc-wasm/cabal/bin/cabal --numeric-version)"
+          echo "HOST_GHC_BIN=${GHC_BIN}" >> "$GITHUB_ENV"
+          HASH=$(printf '%s' "v2-${GHC_VERSION}-${CABAL_VERSION}-${ALEX_VERSION}-${HAPPY_VERSION}" | sha256sum | cut -d' ' -f1)
+          echo "NATIVE_UTILS_KEY=matrix-native-tools-v7-${{ runner.os }}-${{ runner.arch }}-${HASH}" >> "$GITHUB_ENV"
+      - name: Restore native-utilities cache
+        id: native-utils-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.native-utils
+          key: ${{ env.NATIVE_UTILS_KEY }}
+      - name: Set native-utilities datadir env vars
+        run: |
+          echo "alex_datadir=$HOME/.native-utils/share/alex-${ALEX_VERSION}" >> "$GITHUB_ENV"
+          echo "happy_datadir=$HOME/.native-utils/share/happy-${HAPPY_VERSION}" >> "$GITHUB_ENV"
+      - name: Add native-utilities dir to PATH (exact hit)
+        if: steps.native-utils-cache-restore.outputs.cache-hit == 'true'
+        run: echo "$HOME/.native-utils" >> "$GITHUB_PATH"
+      - name: Validate restored native utilities (exact hit)
+        if: steps.native-utils-cache-restore.outputs.cache-hit == 'true'
+        run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-native-utils.sh"
+      - name: Install native utilities (exact miss)
+        if: steps.native-utils-cache-restore.outputs.cache-hit != 'true'
+        id: install-native-utils
+        run: |
+          echo ">>> Update cabal"
+          ~/.ghc-wasm/cabal/bin/cabal update
+          echo ">>> Install alex and happy"
+          mkdir -p ~/.native-utils
+          ~/.ghc-wasm/cabal/bin/cabal install \
+            --with-compiler="$HOST_GHC_BIN" \
+            --installdir="$HOME/.native-utils" --install-method=copy --overwrite-policy=always \
+            "alex-${ALEX_VERSION}" "happy-${HAPPY_VERSION}"
+          echo "$HOME/.native-utils" >> "$GITHUB_PATH"
+
+          echo ">>> Copy alex/happy datadirs into the cached payload"
+          mkdir -p "${alex_datadir}" "${happy_datadir}"
+          alex_store_share="$(find "$HOME/.local/state/cabal/store" -type d -path "*/alex-${ALEX_VERSION}-*/share" | head -1)"
+          happy_store_share="$(find "$HOME/.local/state/cabal/store" -type d -path "*/happy-${HAPPY_VERSION}-*/share" | head -1)"
+          [ -n "${alex_store_share}" ] || { echo "::error::could not locate alex's installed share directory" >&2; exit 1; }
+          [ -n "${happy_store_share}" ] || { echo "::error::could not locate happy's installed share directory" >&2; exit 1; }
+          cp -R "${alex_store_share}/." "${alex_datadir}/"
+          cp -R "${happy_store_share}/." "${happy_datadir}/"
+      - name: Validate installed native utilities (after install)
+        if: steps.install-native-utils.outcome == 'success'
+        run: bash "$GITHUB_WORKSPACE/als/.github/scripts/validate-native-utils.sh"
+      - name: Cache native utilities (Agda 2.8.0 is the sole writer)
+        if: |
+          matrix.agda.name == '2.8.0' && github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.native-utils-cache-restore.outputs.cache-hit != 'true' && steps.install-native-utils.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.native-utils
+          key: ${{ env.NATIVE_UTILS_KEY }}
+      - name: Checkout Agda submodule at v${{ matrix.agda.name }}
+        run: |
+          cd als/wasm-submodules/agda
+          git fetch --depth 1 origin "${{ matrix.agda.commit }}"
+          git checkout FETCH_HEAD
+          echo "AGDA_WASM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Resolve network submodule revision
+        run: echo "NETWORK_SUBMODULE_COMMIT=$(git -C als/wasm-submodules/network rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Compute dist-newstyle cache key
+        id: dist-newstyle-cache-key
+        run: |
+          PRODUCER_HASH=$(printf '%s' "${{ env.WASM_TOOLCHAIN_KEY }}-${{ env.NATIVE_UTILS_KEY }}" | sha256sum | cut -d' ' -f1)
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' als/package.yaml | sha256sum | cut -d' ' -f1)
+          echo "key=matrix-dist-newstyle-v3-${{ env.CI_CACHE_KEY }}-agda-${{ env.AGDA_WASM_COMMIT }}-net-${{ env.NETWORK_SUBMODULE_COMMIT }}-producers-${PRODUCER_HASH}-${{ hashFiles('als/cabal.project.wasm32') }}-${DEPS_FINGERPRINT}" >> "$GITHUB_OUTPUT"
+      - name: Restore dist-newstyle cache for resolved Agda revision
+        id: dist-newstyle-cache-restore-resolved
+        uses: actions/cache/restore@v4
+        with:
+          path: als/dist-newstyle
+          key: ${{ steps.dist-newstyle-cache-key.outputs.key }}
+      - name: Compute cabal store cache key
+        working-directory: ./als
+        run: |
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
+          PRODUCER_HASH=$(printf '%s' "${{ env.WASM_TOOLCHAIN_KEY }}-${{ env.NATIVE_UTILS_KEY }}" | sha256sum | cut -d' ' -f1)
+          PROJECT_HASH="${{ hashFiles('als/cabal.project.wasm32') }}"
+          echo "CABAL_STORE_KEY=matrix-cabal-store-v2-${PRODUCER_HASH}-agda-${{ env.AGDA_WASM_COMMIT }}-net-${{ env.NETWORK_SUBMODULE_COMMIT }}-${PROJECT_HASH}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
+          echo "CABAL_STORE_FALLBACK_KEY=matrix-cabal-store-v1-${{ env.WASM_TOOLCHAIN_KEY }}-${PROJECT_HASH}-${DEPS_FINGERPRINT}" >> "$GITHUB_ENV"
+      - name: Restore cabal global store cache
+        id: cabal-store-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ghc-wasm/.cabal/store
+          key: ${{ env.CABAL_STORE_KEY }}
+          restore-keys: |
+            ${{ env.CABAL_STORE_FALLBACK_KEY }}
+      - name: "\U0001F4CB Cache summary"
+        run: |
+          {
+            echo "### Cache summary (${{ matrix.agda.name }}, ${{ runner.os }}/${{ runner.arch }})"
+            echo "| cache | hit | key |"
+            echo "|---|---|---|"
+            echo "| toolchain | ${{ steps.ghc-wasm-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.WASM_TOOLCHAIN_KEY }}\` |"
+            echo "| native-utils | ${{ steps.native-utils-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.NATIVE_UTILS_KEY }}\` |"
+            echo "| cabal-store | ${{ steps.cabal-store-cache-restore.outputs.cache-hit || 'false' }} | \`${{ env.CABAL_STORE_KEY }}\` |"
+            echo "| dist-newstyle | ${{ steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit || 'false' }} | \`${{ steps.dist-newstyle-cache-key.outputs.key }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Cabal configure
+        working-directory: ./als
+        run: |
+          mv cabal.project.wasm32 cabal.project
+          wasm32-wasi-cabal configure --flag=Agda-${{ matrix.agda.flag }}
+      - name: Build Agda as dependency
+        id: build-dep-agda
+        working-directory: ./als
+        run: wasm32-wasi-cabal build lib:agda
+      - name: Build dependencies other than Agda
+        id: build-deps-other-than-agda
+        working-directory: ./als
+        run: |
+          # Setup network submodule autotools
+          cd wasm-submodules/network
+          autoreconf -i
+          cd ../..
+          # Build all dependencies (cabal git deps + network submodule)
+          wasm32-wasi-cabal build --dependencies-only
+      - name: Cache dist-newstyle
+        uses: actions/cache/save@v4
+        if: |
+          github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps-other-than-agda.outcome == 'success' && steps.dist-newstyle-cache-restore-resolved.outputs.cache-hit != 'true'
+        with:
+          path: als/dist-newstyle
+          key: ${{ steps.dist-newstyle-cache-key.outputs.key }}
+      - name: Save cabal global store cache
+        if: |
+          github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.cabal-store-cache-restore.outputs.cache-hit != 'true' && steps.build-deps-other-than-agda.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ghc-wasm/.cabal/store
+          key: ${{ env.CABAL_STORE_KEY }}
+      - name: Build als
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        working-directory: ./als
+        run: |
+          mkdir ~/out
+          wasm32-wasi-cabal build
+          WASM_BINARY_PATH=$(wasm32-wasi-cabal list-bin als)
+          cp "$WASM_BINARY_PATH" ~/out/${WASM_ASSET_BASENAME}.wasm
+          echo "WASM_BINARY_NAME=${WASM_ASSET_BASENAME}.wasm" >> $GITHUB_ENV
+      - name: "\U0001F4E4 Upload WASM artifact"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WASM_ASSET_BASENAME }}
+          path: ~/out/${{ env.WASM_BINARY_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+    timeout-minutes: 90
+    if: github.event_name != 'schedule'
+  schedule-observe:
+    name: Scheduled native cache refresh
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+        agda:
+          - Agda-2.8.0
+      fail-fast: false
+    steps:
+      - name: "\U0001F4E5 Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          ref: 818ec174c7a2ded86137089b39ae28521a7af6a9
+      - name: "\U0001F4E4 Install yq (Windows)"
+        if: runner.os == 'Windows'
+        uses: frenck/action-setup-yq@v1
+        with:
+          version: v4.53.6
+      - name: "\U0001F39B️ Determine which version of Agda to target"
+        run: |
+          STACK_YAML=$(echo stack-9.10.2-${{ matrix.agda }}.yaml)
+          STACK_YAML_ARG="--stack-yaml $(echo stack-9.10.2-${{ matrix.agda }}.yaml)"
+
+          # Determine artifact naming based on branch/tag
+          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PREFIX="als-dev"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            PREFIX="als-${{ github.ref_name }}"
+          else
+            PREFIX="als"
+          fi
+
+          if [[ ${{ matrix.os }} == "ubuntu-24.04" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-ubuntu"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-arm64"
+          fi
+          if [[ ${{ matrix.os }} == "macos-15-intel" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-macos-x64"
+          fi
+          if [[ ${{ matrix.os }} == "windows-latest" ]]; then
+            ARTEFACT="$PREFIX-${{ matrix.agda }}-windows"
+          fi
+
+          echo STACK_YAML_ARG="${STACK_YAML_ARG}" >> "${GITHUB_ENV}"
+          echo STACK_YAML="${STACK_YAML}"         >> "${GITHUB_ENV}"
+          echo ARTEFACT="${ARTEFACT}"             >> "${GITHUB_ENV}"
+      - name: "\U0001F39B️ Determine Stack resolver & GHC version"
+        run: |
+          STACK_RESOLVER=$(yq .resolver $STACK_YAML)
+          GHC_VERSION=$(echo $(yq .compiler $STACK_YAML) | cut -c 5-)
+          echo STACK_RESOLVER="${STACK_RESOLVER}" >> "${GITHUB_ENV}"
+          echo GHC_VERSION="${GHC_VERSION}"       >> "${GITHUB_ENV}"
+      - name: Prepare Linux toolchain cache permissions
+        if: runner.os == 'Linux'
+        run: sudo chown -R "$(id -u):$(id -g)" /usr/local/.ghcup
+      - name: "\U0001F4BE Restore Haskell toolchain cache (all platforms, shared across Agda targets, before setup)"
+        id: haskell-toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: matrix-ghcup-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}
+      - name: "\U0001F3D7 Setup Haskell (pinned Stack version, all platforms)"
+        uses: haskell-actions/setup@6037f33647c3f17758a2356c80fc4a53d7e0685d
+        with:
+          ghc-version: ${{ env.GHC_VERSION }}
+          enable-stack: true
+          stack-version: ${{ env.STACK_VERSION }}
+      - name: "\U0001F50D Verify pinned Stack version"
+        run: |
+          actual="$(stack --numeric-version)"
+          echo "Stack version: ${actual}"
+          if [[ "${actual}" != "${STACK_VERSION}" ]]; then
+            echo "::error::expected pinned Stack ${STACK_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F50D Verify pinned GHC version"
+        run: |
+          actual="$(ghc --numeric-version)"
+          echo "GHC version: ${actual}"
+          if [[ "${actual}" != "${GHC_VERSION}" ]]; then
+            echo "::error::expected pinned GHC ${GHC_VERSION}, got ${actual}"
+            exit 1
+          fi
+      - name: "\U0001F4BE Save Haskell toolchain cache (Agda 2.8.0 is the sole writer, right after setup+verification)"
+        if: |
+          matrix.agda == 'Agda-2.8.0' && github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.haskell-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.os == 'Windows' && 'C:\ghcup' || runner.os == 'Linux' && '/usr/local/.ghcup' || '~/.ghcup' }}
+          key: ${{ steps.haskell-toolchain.outputs.cache-primary-key }}
+      - name: "\U0001F39B️ Determine Stack root"
+        run: |
+          STACK_ROOT="$(stack path $STACK_YAML_ARG --stack-root)"
+          echo STACK_ROOT="${STACK_ROOT}"         >> "${GITHUB_ENV}"
+      - name: ⚙️ Set PKG_CONFIG_PATH for the ICU library (on macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo PKG_CONFIG_PATH="$(brew --prefix)/opt/icu4c/lib/pkgconfig" >> "${GITHUB_ENV}"
+      - name: "\U0001F4E5 Install the icu library (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          # -Sy refreshes the package database first: the GH Windows runner
+          # image ships a bundled MSYS2 db snapshot that can reference
+          # package versions mirrors have since pruned, causing "failed
+          # retrieving file ... 404" across every configured mirror despite
+          # the requested packages being entirely unversioned here.
+          #
+          # mingw64, not clang64: with system-ghc: true, Cabal's configure
+          # step (via Stack) hardcodes --extra-include-dirs/--extra-lib-dirs
+          # pointing at Stack's bundled msys2/mingw64 tree regardless of
+          # which MSYS2 subsystem we install into, so the packages actually
+          # used by the linker must live under mingw64, not clang64.
+          stack exec $STACK_YAML_ARG -- pacman -Sy --noconfirm
+          stack exec $STACK_YAML_ARG -- pacman -S --noconfirm mingw-w64-x86_64-icu mingw-w64-x86_64-pkgconf
+      - name: "\U0001F6E3️ Add MSYS2 mingw64 bin to PATH (on Windows)"
+        if: runner.os == 'Windows'
+        run: |
+          stack path $STACK_YAML_ARG --extra-library-dirs | tr ',' '\n' | grep -i 'bin$' | sed 's/^ *//' >> "${GITHUB_PATH}"
+      - name: "\U0001F39B️ Resolve ICU version"
+        env:
+          RUNNER_OS: ${{ runner.os }}
+        run: bash .github/scripts/resolve-icu-version.sh
+      - name: "\U0001F39B️ Compute compiled-dependency CONFIG_HASH"
+        run: |
+          DEPS_FINGERPRINT=$(yq -o=json '[.. | select(has("dependencies")) | .dependencies]' package.yaml | sha256sum | cut -d' ' -f1)
+          echo CONFIG_HASH="${{ hashFiles(env.STACK_YAML, format('{0}.lock', env.STACK_YAML), '.github/workflows/test.yaml') }}-${DEPS_FINGERPRINT}-${{ inputs.generation || 'baseline' }}" >> "${GITHUB_ENV}"
+      - name: "\U0001F50D Review all variables"
+        run: |
+          echo "STACK_YAML      = ${STACK_YAML}"
+          echo "STACK_YAML_ARG  = ${STACK_YAML_ARG}"
+          echo "STACK_RESOLVER  = ${STACK_RESOLVER}"
+          echo "ARTEFACT        = ${ARTEFACT}"
+          echo "GHC_VERSION     = ${GHC_VERSION}"
+          echo "STACK_VERSION   = ${STACK_VERSION}"
+          echo "ICU_VERSION     = ${ICU_VERSION}"
+          echo "STACK_ROOT      = ${STACK_ROOT}"
+          echo "CONFIG_HASH     = ${CONFIG_HASH}"
+      - name: "\U0001F4BE Restore compiled-dependency cache"
+        id: stack-snapshot
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+          restore-keys: |
+            matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-
+      - name: "\U0001F4F8 Build Snapshot"
+        run: stack build $STACK_YAML_ARG --no-terminal --only-snapshot -j1
+        if: steps.stack-snapshot.outputs.cache-matched-key != ''
+      - name: "\U0001F3D7️ Build Dependencies"
+        id: build-deps
+        run: stack build $STACK_YAML_ARG --no-terminal --only-dependencies
+        if: steps.stack-snapshot.outputs.cache-matched-key != ''
+      - name: "\U0001F3D7️ Build Testings"
+        id: build-test-deps
+        run: stack build $STACK_YAML_ARG --test --no-terminal --only-dependencies
+        if: steps.stack-snapshot.outputs.cache-matched-key != ''
+      - name: "\U0001F4BE Save compiled-dependency cache"
+        if: |
+          github.ref == 'refs/heads/master' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) && steps.build-deps.outcome == 'success' && steps.build-test-deps.outcome == 'success' && steps.stack-snapshot.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.STACK_ROOT }}/snapshots
+            ${{ env.STACK_ROOT }}/setup-exe-cache
+          key: matrix-stack-snapshot-v3-${{ runner.os }}-${{ runner.arch }}-${{ env.STACK_VERSION }}-${{ env.GHC_VERSION }}-${{ env.ICU_VERSION }}-${{ env.STACK_RESOLVER }}-${{ matrix.agda }}-${{ env.CONFIG_HASH }}
+      - name: "\U0001F3D7️ Build ALS"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: stack build $STACK_YAML_ARG
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on macOS)"
+        if: (runner.os == 'macOS') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: |
+
+          # see if icu4c has been installed
+          if [ "$(brew list | grep icu4c)" = "" ]
+              then
+                  echo "installing icu4c"
+                  brew install icu4c
+          fi
+
+          # get the directory of the DDLs we want (icuuc, icui18n, icudata)
+          dylib_dir=$(dirname "$(brew list icu4c | grep icuuc.dylib)")
+          echo "dylib_dir: $dylib_dir"
+
+          # find the path of "als"
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)"/bin -name "als")
+          echo "executable: $executable"
+
+          # remove the old dylib, and make a new one
+          rm -rf dylib
+          mkdir dylib
+
+          ################################################################################
+          # icuuc
+          ################################################################################
+
+          icuuc_id=$(otool -L "$executable" | grep icuuc | awk '{print $1}')
+          icuuc_id_basename=$(basename "$icuuc_id")
+
+          icuuc_path=$dylib_dir/$icuuc_id_basename
+          icuuc_path_new=dylib/$icuuc_id_basename
+          icuuc_id_new=@loader_path/dylib/$icuuc_id_basename
+
+          # copy icuuc to the new directory
+          cp "$icuuc_path" "$icuuc_path_new"
+
+          # change icuuc's ID referenced by ALS
+          install_name_tool -change "$icuuc_id" "$icuuc_id_new" "$executable"
+
+          echo "icuuc referenced by ALS"
+          echo "    old ID  : $icuuc_id"
+          echo "    new ID  : $icuuc_id_new"
+          echo "    old path: $icuuc_path"
+          echo "    new path: $icuuc_path_new"
+
+          ################################################################################
+          # icui18n
+          ################################################################################
+
+          icui18n_id=$(otool -L "$executable" | grep icui18n | awk '{print $1}')
+          icui18n_id_basename=$(basename "$icui18n_id")
+
+          icui18n_path=$dylib_dir/$icui18n_id_basename
+          icui18n_path_new=dylib/$icui18n_id_basename
+          icui18n_id_new=@loader_path/dylib/$icui18n_id_basename
+
+          # copy icui18n to the new directory
+          cp "$icui18n_path" "$icui18n_path_new"
+
+          # change icui18n's ID referenced by ALS
+          install_name_tool -change "$icui18n_id" "$icui18n_id_new" "$executable"
+
+          echo "icui18n referenced by ALS"
+          echo "    old ID  : $icui18n_id"
+          echo "    new ID  : $icui18n_id_new"
+          echo "    old path: $icui18n_path"
+          echo "    new path: $icui18n_path_new"
+
+          ################################################################################
+          # icudata
+          ################################################################################
+
+          # otool -L "$icui18n_id" | grep icudata | awk '{print $1}'
+          icudata_id=$(otool -L "$icuuc_path" | grep icudata | awk '{print $1}')
+          icudata_id_basename=$(basename "$icudata_id")
+
+          icudata_path=$dylib_dir/$icudata_id_basename
+          icudata_path_new=dylib/$icudata_id_basename
+
+          # copy icudata to the new directory
+          cp "$icudata_path" "$icudata_path_new"
+
+          # no need of changing the ID because supposely it's already of "@loader_path"
+
+          echo "icudata referenced by icuuc"
+          echo "    old ID    : $icudata_id"
+          echo "    old path  : $icudata_path"
+          echo "    new path  : $icudata_path_new"
+      - name: "\U0001F4E6 Bundle ICU libraries (on Linux)"
+        if: (runner.os == 'Linux') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: |
+          command -v patchelf >/dev/null 2>&1 || sudo apt-get install -y patchelf
+
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
+          echo "executable: $executable"
+
+          rm -rf lib
+          mkdir lib
+
+          for name in libicuuc libicui18n libicudata; do
+            entry=$(ldd "$executable" | grep "${name}\.so" || true)
+            if [[ -z "$entry" ]]; then
+              echo "::error::could not find $name in ldd output for $executable"
+              exit 1
+            fi
+            soname=$(echo "$entry" | awk '{print $1}')
+            real_path=$(readlink -f "$(echo "$entry" | awk '{print $3}')")
+            cp "$real_path" "lib/$soname"
+            echo "bundled $soname (from $real_path)"
+          done
+
+          # $ORIGIN is a dynamic-linker token (the directory containing
+          # the executable at run time), not a shell variable -- must
+          # stay unexpanded here.
+          patchelf --set-rpath '$ORIGIN/lib' "$executable"
+          echo "rpath set on $executable: $(patchelf --print-rpath "$executable")"
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Linux and macOS)"
+        if: (runner.os != 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        id: zip
+        run: |
+          # locate the data-dir
+          datadir=$(find "$(stack path $STACK_YAML_ARG --snapshot-install-root)/share" -type d -name "Agda-*")
+          echo "datadir: $datadir"
+
+          # locate the executable
+          executable=$(find "$(stack path $STACK_YAML_ARG --local-install-root)/bin" -name "als")
+          echo "executable: $executable"
+
+          # make a temporary directory for compresssing
+          mkdir zip
+          cp -r "$datadir" zip/data
+          if [[ ${{ runner.os }} == "macOS" ]]; then
+              cp -r dylib zip/dylib
+          fi
+          if [[ ${{ runner.os }} == "Linux" ]]; then
+              cp -r lib zip/lib
+          fi
+          cp "$executable" zip/
+
+          # compress
+          cd zip
+          zip -r $ARTEFACT.zip ./*
+          cd ..
+          mv zip/$ARTEFACT.zip .
+      - name: "\U0001F4E6 Bundle executable, DLLs and data files (on Windows)"
+        if: (runner.os == 'Windows') && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        shell: pwsh
+        run: |
+          # locate the data-dir
+          $snapshot = (stack path $STACK_YAML_ARG --snapshot-install-root)
+          $datadir = (ls $snapshot\share *Agda-* -Recurse -Directory).FullName
+
+          # locate the executable
+          $local = (stack path $STACK_YAML_ARG --local-install-root)
+          $executable = (ls $local\bin *als.exe* -Recurse -File).FullName
+
+          # make a temporary directory for compresssing
+          mkdir zip
+          cp -r $datadir zip/data
+          cp $executable zip/
+
+          # include text-icu DLLs
+          $mingw64bin = (stack path $STACK_YAML_ARG --extra-library-dirs).split(", ") -match "\\bin"
+          cp (ls $mingw64bin *libicudt*) zip/
+          cp (ls $mingw64bin *libicuin*) zip/
+          cp (ls $mingw64bin *libicuuc*) zip/
+          # ICU imports these MinGW runtimes. Take them from ICU's own
+          # directory, so the bundled copies match the ICU they serve.
+          foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+            cp (Join-Path $mingw64bin $runtime) zip/ -ErrorAction Stop
+          }
+          ls zip
+
+          # compress
+          cd zip
+          Compress-Archive * "$($env:ARTEFACT).zip"
+          cd ..
+          mv zip/"$($env:ARTEFACT).zip" .
+      - name: "\U0001F9EA Run tests"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        run: stack test $STACK_YAML_ARG
+      - name: "\U0001F4E4 Upload native artifact"
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.cache-only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTEFACT }}
+          path: ${{ env.ARTEFACT }}.zip
+          if-no-files-found: error
+          retention-days: 7
+      - name: Record cache and runner evidence
+        if: always()
+        env:
+          TOOLCHAIN_HIT: ${{ steps.haskell-toolchain.outputs.cache-hit }}
+          DEPENDENCY_HIT: ${{ steps.stack-snapshot.outputs.cache-hit }}
+          MATCHED_KEY: ${{ steps.stack-snapshot.outputs.cache-matched-key }}
+        run: |
+          {
+            echo "### Native cache evidence"
+            echo "- Runner: $RUNNER_OS/$RUNNER_ARCH; image ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "- ICU: ${ICU_VERSION:-unknown}"
+            echo "- Toolchain exact hit: $TOOLCHAIN_HIT"
+            echo "- Dependencies exact hit: $DEPENDENCY_HIT"
+            echo "- Matched dependency key: $MATCHED_KEY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+    timeout-minutes: 15
+    if: github.event_name == 'schedule'
+run-name: Cache matrix / ${{ github.event_name }} / ${{ inputs.cache-only && 'cache-only' || 'normal' }} / ${{ inputs.generation || 'baseline' }}
