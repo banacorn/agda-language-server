@@ -1,0 +1,40 @@
+name: Reproduce Windows copyFile source locking
+
+on:
+  push:
+    branches: [repro/windows-copyfile-lock]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.10.2'
+      - name: Record toolchain
+        run: |
+          ghc --version
+          ghc-pkg list directory
+          ghc-pkg list Win32
+      - name: Build standalone reproducer
+        run: ghc -Wall -Werror -threaded -rtsopts -with-rtsopts=-N -outputdir repro/build repro/CopyRace.hs -o repro/copy-race.exe
+      - name: Force overlapping source reads
+        run: ./repro/copy-race.exe overlap 2>&1 | Tee-Object repro/overlap-windows.log
+      - name: Race the original fixture-copy implementation
+        if: ${{ !cancelled() }}
+        run: ./repro/copy-race.exe stress 2>&1 | Tee-Object repro/stress-windows.log
+      - name: Preserve reproduction evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-copyfile-reproduction
+          path: repro/*windows.log
