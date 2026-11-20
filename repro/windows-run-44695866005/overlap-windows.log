@@ -1,0 +1,4 @@
+mingw32 / ghc Version {versionBranch = [9,10], versionTags = []}
+copyFile while source is open for reading: Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+ByteString copy with the same reader: Right ()
+REPRODUCED: copyFile rejects a concurrent source reader.

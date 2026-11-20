@@ -1,0 +1,23 @@
+mingw32 / ghc Version {versionBranch = [9,10], versionTags = []}
+Hover: 870 successful copies; 2330 failures
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+HoverLibrary: 1285 successful copies; 1915 failures
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+Left copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)

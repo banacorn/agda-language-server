@@ -1,4 +1,4 @@
-# Hover fixture copy reproduction
+# Windows copyFile source-lock reproduction
 
 Separate checkout: `/private/tmp/als-hover-copy-repro`
 
@@ -8,8 +8,36 @@ The supplied issue is preserved in `repro/issue.md`.
 
 ## Status
 
-**The Windows failure has not been reproduced here.** This host is macOS
-arm64, with GHC 9.10.2 and directory-1.3.8.5. No Windows runtime is available.
+**Reproduced on Windows in the fork's GitHub Actions.**
+
+Run: https://github.com/banacorn/agda-language-server/actions/runs/44695866005
+
+Reproducer commit: `094f8cb`. Runner: `windows-latest`, GHC 9.10.2,
+directory-1.3.8.5, Win32-2.14.1.0, default I/O manager.
+
+| Fixture | Successful copies | Failed copies | Total |
+| --- | ---: | ---: | ---: |
+| Hover | 870 | 2,330 | 3,200 |
+| HoverLibrary | 1,285 | 1,915 | 3,200 |
+
+All twenty sampled stress exceptions exactly match the issue:
+
+```text
+copyFile:atomicCopyFileContents:withReplacementFile:copyFileToHandle:openFile: resource busy (file is locked)
+```
+
+The forced overlap probe also reproduced that exception. The ByteString
+control succeeded with the same source reader held open and preserved file
+contents. Raw Windows output is in `windows-run-44695866005/` and in the
+workflow's `windows-copyfile-reproduction` artifact. The workflow fails because
+the stress executable exits nonzero when it observes copy exceptions.
+
+This reproduces the fixture-copy failure independently of ALS. The full ALS
+hover suite was not run. No fix was applied to the project.
+
+## macOS control
+
+The local host is macOS arm64, with GHC 9.10.2 and directory-1.3.8.5.
 
 The standalone reproducer builds with `-Wall -Werror`. Actual macOS results:
 
@@ -17,8 +45,7 @@ The standalone reproducer builds with `-Wall -Werror`. Actual macOS results:
 * `stress`: 3,200 copies of Hover and 3,200 copies of HoverLibrary, zero failures.
 
 Raw output is in `overlap-macos.log` and `stress-macos.log`.
-These are platform controls, not evidence of a Windows reproduction or a fix.
-The ALS hover suite itself was not run.
+These are platform controls for comparison with the Windows results above.
 
 ## Run on Windows with GHC 9.10.2
 

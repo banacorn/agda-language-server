@@ -1,0 +1,4 @@
+darwin / ghc Version {versionBranch = [9,10], versionTags = []}
+Hover: 3200 successful copies; 0 failures
+HoverLibrary: 3200 successful copies; 0 failures
+No failures observed; a passing stress run cannot rule out the race.

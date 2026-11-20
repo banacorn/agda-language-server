@@ -1,0 +1,4 @@
+darwin / ghc Version {versionBranch = [9,10], versionTags = []}
+copyFile while source is open for reading: Right ()
+ByteString copy with the same reader: Right ()
+POSIX CONTROL PASSED; this does not reproduce the Windows failure.
